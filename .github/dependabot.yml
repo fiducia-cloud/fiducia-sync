@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # The JS/TS SDK (and its lockfile) lives under sdk/.
+  - package-ecosystem: npm
+    directory: "/sdk"
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
