@@ -18,6 +18,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Browser bindings (JSON string in/out) — only compiled for the wasm build so
+// native `cargo test` stays free of wasm-bindgen. See src/wasm.rs.
+#[cfg(feature = "wasm")]
+mod wasm;
+
 /// Whether a change puts the row or removes it. Insert/Update collapse into
 /// `Upsert` — the monotonic `version` disambiguates ordering, so callers never
 /// distinguish first-write from later-write.
