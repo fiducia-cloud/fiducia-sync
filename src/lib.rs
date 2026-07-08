@@ -156,7 +156,7 @@ pub struct WriteAck {
     pub committed_version: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {
     /// Adopt `committed_version` and clear dirty — our write is the latest.
     Adopt(i64),
