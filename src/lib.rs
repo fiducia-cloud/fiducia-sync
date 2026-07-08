@@ -51,7 +51,7 @@ pub struct ChangeEvent {
 
 /// The sync-relevant metadata a caller holds for a row in IndexedDB. `dirty` is
 /// true when the local copy has an un-acked optimistic write on top of `version`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRow {
     pub version: i64,
     pub dirty: bool,
