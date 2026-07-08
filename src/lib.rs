@@ -57,7 +57,7 @@ pub struct LocalRow {
     pub dirty: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IgnoreReason {
     /// Incoming is older than what we hold.
     Stale,
