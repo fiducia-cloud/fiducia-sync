@@ -1,0 +1,21 @@
+[package]
+name = "fiducia-sync-core"
+version = "0.1.0"
+edition = "2021"
+description = "Transport-agnostic local-first sync core (version reconciliation + write-queue) for fiducia.cloud. Builds native for tests and to wasm for the @fiducia/sync SDK; the same crate is reusable server-side."
+license = "MIT"
+
+[lib]
+# rlib for native unit tests + server-side reuse; cdylib for the wasm build.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# wasm-bindgen is only pulled in for the browser build (see src/wasm.rs, behind
+# the `wasm` feature) so native `cargo test` stays lean.
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+wasm = ["dep:wasm-bindgen"]
