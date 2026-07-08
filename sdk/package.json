@@ -6,8 +6,7 @@
   "description": "Local-first sync SDK for fiducia.cloud — an optimistic IndexedDB store reconciled with Postgres over Supabase realtime + the backend WS, powered by the fiducia-sync-core WASM.",
   "exports": {
     ".": "./src/index.mjs",
-    "./store": "./src/store.mjs",
-    "./htmx": "./src/htmx.mjs"
+    "./store": "./src/store.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",

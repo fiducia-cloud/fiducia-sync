@@ -11,3 +11,4 @@ dist/
 
 # Scratch / git worktrees (tmp/worktrees/*)
 tmp/
+pkg-node/
