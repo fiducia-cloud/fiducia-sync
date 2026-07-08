@@ -14,3 +14,7 @@
 export { openStore, makeQueue, promisify } from "./store.mjs";
 export { wrapCore, loadBrowserCore } from "./core.mjs";
 export { makeSyncClient } from "./client.mjs";
+export { connectBackend, backendSend } from "./transports/backend.mjs";
+export { subscribeSupabase } from "./transports/supabase.mjs";
+export { decodeBackendMessage, decodeSupabaseChange } from "./transports/decode.mjs";
+export { optimisticIntent, registerOptimisticExtension } from "./htmx.mjs";
