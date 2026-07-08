@@ -18,6 +18,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Browser bindings (JSON string in/out) — only compiled for the wasm build so
+// native `cargo test` stays free of wasm-bindgen. See src/wasm.rs.
+#[cfg(feature = "wasm")]
+mod wasm;
+
 /// Whether a change puts the row or removes it. Insert/Update collapse into
 /// `Upsert` — the monotonic `version` disambiguates ordering, so callers never
 /// distinguish first-write from later-write.
@@ -46,13 +51,13 @@ pub struct ChangeEvent {
 
 /// The sync-relevant metadata a caller holds for a row in IndexedDB. `dirty` is
 /// true when the local copy has an un-acked optimistic write on top of `version`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRow {
     pub version: i64,
     pub dirty: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IgnoreReason {
     /// Incoming is older than what we hold.
     Stale,
@@ -61,7 +66,7 @@ pub enum IgnoreReason {
 }
 
 /// What to do with an incoming change given the local row (if any).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reconcile {
     /// Write the incoming change to the local store and mark the row clean.
     Apply,
@@ -151,7 +156,7 @@ pub struct WriteAck {
     pub committed_version: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AckOutcome {
     /// Adopt `committed_version` and clear dirty — our write is the latest.
     Adopt(i64),

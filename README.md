@@ -61,10 +61,19 @@ See `docs/repo-boundaries.md`.
 ## Status
 
 - ✅ `fiducia-sync-core` — reconcile + write-queue ack rules, `cargo test` 7/7.
-- ▶ wasm-bindgen wrapper + TS shim (IndexedDB, transports, hx-optimistic) — next.
+- ✅ wasm-bindgen bindings (`src/wasm.rs`) — `wasm-pack build` produces `pkg/`.
+- ▶ TS shim (IndexedDB, transports, hx-optimistic extension) — next.
 
 ## Develop
 
 ```sh
 ./shell cargo test          # core logic (no browser/wasm needed)
+
+# Browser WASM package. Needs a rustup toolchain WITH the wasm32-unknown-unknown
+# target — a Homebrew-only rustc will not work (no wasm std in its sysroot). If
+# `rustc` resolves to Homebrew, put the rustup toolchain first, e.g.:
+#   PATH="$(dirname "$(rustup which rustc)"):$PATH" wasm-pack build ...
+wasm-pack build --target bundler --out-dir pkg -- --features wasm
 ```
+
+The `pkg/` output (gitignored) is the wasm module the TS shim imports.
