@@ -66,7 +66,7 @@ pub enum IgnoreReason {
 }
 
 /// What to do with an incoming change given the local row (if any).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reconcile {
     /// Write the incoming change to the local store and mark the row clean.
     Apply,
