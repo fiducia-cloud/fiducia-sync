@@ -1,0 +1,39 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Native Rust unit tests for the transport-agnostic sync-core.
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+
+  # Build the node-target WASM from the same crate, then run the SDK tests that
+  # import ../pkg-node.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: build node-target wasm
+        run: wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm
+      - name: sdk tests
+        working-directory: sdk
+        run: |
+          npm ci
+          node --test tests/*.test.mjs
