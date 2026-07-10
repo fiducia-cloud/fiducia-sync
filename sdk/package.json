@@ -14,6 +14,7 @@
     "build:wasm": "cd .. && wasm-pack build --target bundler --out-dir pkg -- --features wasm"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "fake-indexeddb": "^6.0.0"
   }
 }
