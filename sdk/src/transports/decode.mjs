@@ -25,18 +25,35 @@ export function decodeBackendMessage(data) {
   return msg.changes.filter(isChangeEvent);
 }
 
-/** Supabase postgres_changes payload -> ChangeEvent (or null if unusable). */
+/**
+ * Supabase `postgres_changes` payload -> ChangeEvent (or null if unusable).
+ *
+ * IMPORTANT: Supabase realtime only includes the FULL row (with our monotonic
+ * `version` column) when the table is `REPLICA IDENTITY FULL`. For DELETE events
+ * without that, `payload.old` carries ONLY the primary key — no `version`. We do
+ * NOT fabricate `version: 0` in that case: a 0 would reconcile as "stale" and the
+ * delete would be silently dropped. Instead we return null so the caller ignores
+ * this (unorderable) event and relies on the backend WS frame — which always
+ * carries `version` — or on catch-up hydration. Set REPLICA IDENTITY FULL on
+ * every synced table (see fiducia-interfaces) to make deletes flow over Supabase.
+ */
 export function decodeSupabaseChange(table, payload) {
   if (!payload || typeof payload !== "object") return null;
   const isDelete = payload.eventType === "DELETE";
   const row = (isDelete ? payload.old : payload.new) ?? null;
   if (!row || row.id == null) return null;
+
+  // `version` must be a real number to order the change — bail rather than
+  // invent a stale 0 that would drop the change.
+  const rawVersion = row.version ?? payload.new?.version ?? payload.old?.version;
+  if (rawVersion == null || Number.isNaN(Number(rawVersion))) return null;
+
   return {
     table,
     op: isDelete ? "delete" : "upsert",
     id: String(row.id),
-    version: row.version != null ? Number(row.version) : 0,
+    version: Number(rawVersion),
     row,
-    at_ms: 0,
+    at_ms: payload.commit_timestamp ? Date.parse(payload.commit_timestamp) || 0 : 0,
   };
 }
