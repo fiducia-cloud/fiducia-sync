@@ -83,12 +83,21 @@ export function connectBackend({
     }
   }
 
-  const startSse = async () => {
+  // Resolve the token only when a provider is configured; otherwise stay fully
+  // synchronous (construct the socket now) so callers/tests see it immediately.
+  const withMaybeToken = (fn) => {
+    if (getToken) Promise.resolve(tokenOrNull()).then((t) => fn(t));
+    else fn(null);
+  };
+
+  const startSse = () => {
     if (source || stopped || !ES) return;
     status("sse");
-    const url = withToken(new URL(ssePath, baseUrl).toString(), await tokenOrNull());
-    source = new ES(url);
-    source.addEventListener("fiducia-sync", (e) => deliver(e.data));
+    withMaybeToken((token) => {
+      if (source || stopped) return;
+      source = new ES(withToken(new URL(ssePath, baseUrl).toString(), token));
+      source.addEventListener("fiducia-sync", (e) => deliver(e.data));
+    });
   };
 
   const scheduleReconnect = () => {
@@ -103,11 +112,11 @@ export function connectBackend({
     timer = setTimeoutImpl(connectWs, backoff + jitter);
   };
 
-  async function connectWs() {
+  function connectWs() {
     if (stopped) return;
     if (!WS) {
       // No WebSocket in this environment — fall back to SSE for reads.
-      await startSse();
+      startSse();
       return;
     }
     let wsUrl;
@@ -115,24 +124,27 @@ export function connectBackend({
       wsUrl = new URL(wsPath, baseUrl);
       wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
     } catch {
-      await startSse();
+      startSse();
       return;
     }
-    try {
-      socket = new WS(withToken(wsUrl.toString(), await tokenOrNull()));
-    } catch {
-      await startSse();
-      return;
-    }
-    socket.addEventListener("open", () => {
-      attempts = 0;
-      status("open");
-    });
-    socket.addEventListener("message", (e) => deliver(e.data));
-    socket.addEventListener("error", () => {});
-    socket.addEventListener("close", () => {
-      socket = null;
-      scheduleReconnect();
+    withMaybeToken((token) => {
+      if (stopped) return;
+      try {
+        socket = new WS(withToken(wsUrl.toString(), token));
+      } catch {
+        startSse();
+        return;
+      }
+      socket.addEventListener("open", () => {
+        attempts = 0;
+        status("open");
+      });
+      socket.addEventListener("message", (e) => deliver(e.data));
+      socket.addEventListener("error", () => {});
+      socket.addEventListener("close", () => {
+        socket = null;
+        scheduleReconnect();
+      });
     });
   }
 
