@@ -79,7 +79,7 @@ test("connectBackend falls back to SSE when no WebSocket is available", () => {
   connectBackend({
     baseUrl: "http://localhost",
     onChanges: (c) => seen.push(...c),
-    WebSocketImpl: undefined, // force "no WS"
+    WebSocketImpl: null, // explicitly force "no WS" (node 22 has a global WebSocket)
     EventSourceImpl: MockES,
     setTimeoutImpl: () => 0,
   });
