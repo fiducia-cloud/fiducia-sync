@@ -37,8 +37,24 @@ test("decodeSupabaseChange maps INSERT/UPDATE/DELETE to ChangeEvents", () => {
   const del = decodeSupabaseChange("api_keys", { eventType: "DELETE", old: { id: "k1", version: 5 } });
   assert.equal(del.op, "delete");
   assert.equal(del.id, "k1");
+  assert.equal(del.version, 5);
 
   assert.equal(decodeSupabaseChange("api_keys", { eventType: "UPDATE", new: {} }), null); // no id
+});
+
+test("decodeSupabaseChange refuses to fabricate a version (deletes without REPLICA IDENTITY FULL)", () => {
+  // A DELETE that carried only the primary key (no version) must NOT decode to
+  // version 0 — that would reconcile as stale and drop the delete. It returns null.
+  assert.equal(decodeSupabaseChange("api_keys", { eventType: "DELETE", old: { id: "k1" } }), null);
+  // An UPDATE without a version is likewise unorderable -> null.
+  assert.equal(decodeSupabaseChange("api_keys", { eventType: "UPDATE", new: { id: "k1", name: "x" } }), null);
+  // commit_timestamp is surfaced as at_ms when present.
+  const c = decodeSupabaseChange("api_keys", {
+    eventType: "INSERT",
+    new: { id: "k1", version: 1 },
+    commit_timestamp: "2026-07-09T00:00:00.000Z",
+  });
+  assert.equal(c.at_ms, Date.parse("2026-07-09T00:00:00.000Z"));
 });
 
 test("optimisticIntent reads data-fiducia-* + request values", () => {
