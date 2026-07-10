@@ -60,8 +60,16 @@ export function connectBackend({
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
 }) {
-  const WS = WebSocketImpl ?? (typeof WebSocket !== "undefined" ? WebSocket : undefined);
-  const ES = EventSourceImpl ?? (typeof EventSource !== "undefined" ? EventSource : undefined);
+  // `undefined` (key absent) => use the platform global; an explicit null/false
+  // => this transport is disabled (used to force the SSE fallback, and in tests).
+  const WS =
+    WebSocketImpl === undefined
+      ? typeof WebSocket !== "undefined" ? WebSocket : undefined
+      : WebSocketImpl || undefined;
+  const ES =
+    EventSourceImpl === undefined
+      ? typeof EventSource !== "undefined" ? EventSource : undefined
+      : EventSourceImpl || undefined;
 
   let socket = null;
   let source = null;
