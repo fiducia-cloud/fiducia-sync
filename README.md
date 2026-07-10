@@ -101,7 +101,9 @@ See `docs/repo-boundaries.md`.
 
 - ✅ `fiducia-sync-core` — reconcile + write-queue ack rules, `cargo test` 7/7.
 - ✅ wasm-bindgen bindings (`src/wasm.rs`) — `wasm-pack build` produces `pkg/`.
-- ▶ TS shim (IndexedDB, transports, hx-optimistic extension) — next.
+- ✅ JS shim — IndexedDB store + durable queue, both transports, hx-optimistic
+  extension, `startSync`, catch-up hydration, idempotent/authed writes,
+  WS auto-reconnect. `node --test` 20/20.
 
 ## Develop
 
