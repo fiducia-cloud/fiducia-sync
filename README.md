@@ -15,19 +15,24 @@ rules, with **zero IO**. It builds:
   Rust backends and the browser agree on one sync protocol; and
 - **wasm** (`--features wasm`, via `wasm-bindgen`) — the browser core.
 
-A thin **TypeScript shim** wraps the WASM core and owns the browser IO:
+A thin **JS shim** (ESM `.mjs`, no build step) wraps the WASM core and owns the
+browser IO:
 
 ```
 @fiducia/sync
 ├── fiducia-sync-core (Rust)         # reconcile(), resolve_conflict(), on_ack(), QueuedWrite
 │     └── wasm-bindgen  → pkg/       # wasm + JS glue
-└── src/ (TS shim)
-    ├── store.ts        # IndexedDB persistence (per-plane DB, one object store per table)
+└── sdk/src/ (JS shim)
+    ├── store.mjs       # IndexedDB persistence + the durable write-queue (per-plane DB,
+    │                   #   one object store per table, `_queue` store survives reload)
+    ├── client.mjs      # applyChange / optimisticWrite / optimisticDelete / flushQueue / hydrate
+    ├── start.mjs       # startSync() — wire BOTH transports into one client (see below)
+    ├── core.mjs        # wraps the wasm ABI (JSON in/out) as object-in/out JS
     ├── transports/
-    │   ├── supabase.ts # postgres_changes → ChangeEvent
-    │   └── backend.ts  # /app/ws + SSE     → ChangeEvent (fallback + write path)
-    ├── queue.ts        # durable write-queue (survives reload), retry/backoff
-    └── htmx.ts         # `hx-ext="fiducia-optimistic"` — intercept hx-post/hx-put:
+    │   ├── supabase.mjs # postgres_changes → ChangeEvent (with RLS-complementing filter)
+    │   ├── backend.mjs  # WS (+ SSE fallback, auto-reconnect) reads; idempotent write path
+    │   └── decode.mjs   # pure payload → ChangeEvent decoders
+    └── htmx.mjs        # `hx-ext="fiducia-optimistic"` — intercept hx-post/hx-put:
                         #   write IndexedDB (instant DOM) → enqueue → POST backend
                         #   → reconcile on ack; offline-capable
 ```
@@ -35,9 +40,43 @@ A thin **TypeScript shim** wraps the WASM core and owns the browser IO:
 ## The ordering key
 
 Every synced Postgres row carries a monotonic `version` (the `bump_row_version`
-trigger in `fiducia-interfaces`). All reconcile decisions use `version` alone, so
-the two transports can deliver the same change in any order and converge. Row and
-change-event shapes are the generated types from `@fiducia/interfaces/db/*`.
+trigger in `fiducia-interfaces` — note it advances on UPDATE; INSERT lands at the
+`default 1`). All reconcile decisions use `version` alone, so the two transports
+can deliver the same change in any order and converge — duplicate delivery is a
+no-op (a re-seen version is Ignored). Row shapes are the generated types from
+`@fiducia/interfaces/db/*`; the `{table, op, id, version, row, at_ms}` change
+envelope is this SDK's contract (it is distinct from the KV/election `ChangeEvent`
+in `@fiducia/interfaces`).
+
+### Supabase requires `REPLICA IDENTITY FULL`
+
+Supabase realtime only includes the full row (with `version`) when the table is
+`REPLICA IDENTITY FULL`. Without it, DELETE events carry only the primary key —
+no `version` — so `decodeSupabaseChange` returns `null` rather than fabricate a
+stale `version: 0` (which would silently drop the delete). The publication +
+`REPLICA IDENTITY FULL` + RLS tenant policies live in `fiducia-interfaces`
+(`sql/{customer,admin}.sql`). The backend WS frame always carries `version`, so
+it is the reliable delete path even when a table is not yet FULL.
+
+## Wiring both transports: `startSync`
+
+`startSync` brings up one reconcile client per plane fed by **both** Supabase
+realtime and the backend WS, and re-hydrates (catch-up) on every (re)connect:
+
+```js
+const sync = await startSync({
+  dbName: "fiducia-customer",
+  tables: ["api_keys"],
+  backend:  { baseUrl: location.origin, getToken },           // WS reads + idempotent writes
+  supabase: { client: supabaseClient, filter: `org_id=eq.${orgId}` }, // realtime, tenant-scoped
+  hydrateFetch: (t) => fetch(`/api/customer/${t}`).then((r) => r.json()),
+});
+// sync.client.optimisticWrite(...), sync.send, sync.stop()
+```
+
+Writes carry a stable `Idempotency-Key` (`table:id:op:base_version`) so retried /
+queued POSTs never double-apply, and an optional bearer token (Authorization on
+fetch; `?access_token=` on WS/SSE, which can't set headers).
 
 ## Reconcile rules (implemented + tested in `src/lib.rs`)
 
