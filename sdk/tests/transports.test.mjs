@@ -1,3 +1,5 @@
+// Tests for the pure transport decoders (decode.mjs) and the htmx optimistic
+// intent parser — no IO, no sockets.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decodeBackendMessage, decodeSupabaseChange } from "../src/transports/decode.mjs";
