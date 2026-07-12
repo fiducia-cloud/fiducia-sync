@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Entry point into the Nix dev shell (.nix/flake.nix). With no args drops into an
+# interactive shell; with args runs that command inside the dev environment,
+# e.g. `./shell cargo test`.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
