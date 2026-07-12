@@ -91,3 +91,46 @@ test("a genuine conflict (someone else's newer change) resolves server-wins and 
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 5, dirty: false });
   assert.equal((await queue.list()).length, 0); // stale queued write dropped
 });
+
+test("optimisticDelete removes the row locally and dequeues on ack", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "a" }, { version: 2, dirty: false });
+  const send = async (w) => {
+    assert.equal(w.op, "delete");
+    assert.equal(w.base_version, 2);
+    return { id: "k1", committed_version: 3 };
+  };
+
+  const res = await client.optimisticDelete("api_keys", "k1", send);
+  assert.equal(res.status, "acked");
+  assert.equal(await store.get("api_keys", "k1"), null); // gone locally
+  assert.equal((await queue.list()).length, 0); // dequeued
+});
+
+test("hydrate catch-up applies newer rows, ignores stale, keeps dirty, prunes clean rows missing from a full snapshot", async (t) => {
+  const { store, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { id: "k1", name: "old" }, { version: 1, dirty: false });
+  await store.put("api_keys", "k2", { id: "k2", name: "mine" }, { version: 1, dirty: true }); // un-acked local edit
+  await store.put("api_keys", "k3", { id: "k3", name: "gone-server-side" }, { version: 4, dirty: false });
+
+  // Authoritative snapshot: k1 advanced to v2, k2 still at v1, k3 absent (deleted).
+  const res = await client.hydrate(
+    "api_keys",
+    [
+      { id: "k1", version: 2, name: "new" },
+      { id: "k2", version: 1, name: "server" },
+    ],
+    { prune: true },
+  );
+
+  assert.deepEqual(await store.get("api_keys", "k1"), { id: "k1", version: 2, name: "new" }); // applied
+  assert.deepEqual(await store.meta("api_keys", "k2"), { version: 1, dirty: true }); // dirty preserved
+  assert.equal(await store.get("api_keys", "k3"), null); // pruned (clean + missing)
+  assert.equal(res.applied, 1);
+  assert.equal(res.ignored, 1);
+  assert.equal(res.pruned, 1);
+});

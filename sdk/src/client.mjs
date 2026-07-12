@@ -56,49 +56,124 @@ export function makeSyncClient({ store, queue, core }) {
     return "ignored"; // {Ignore: "Stale" | "AlreadyApplied"}
   }
 
+  // Apply a server ack against current local state. Returns the AckOutcome so
+  // callers can report the adopted version. `Superseded` means a newer change
+  // already landed locally (via applyChange, which already cleared dirty), so we
+  // leave local untouched; either way the queued write is done and dequeued.
+  async function _applyAck(table, id, ack) {
+    const local = await store.meta(table, id);
+    // No local row (e.g. an optimistic delete already removed it): nothing to adopt.
+    if (!local) return "Superseded";
+    const outcome = core.onAck(local, ack);
+    if (outcome && typeof outcome === "object" && "Adopt" in outcome) {
+      await store.setMeta(table, id, { version: outcome.Adopt, dirty: false });
+    }
+    return outcome;
+  }
+
   /**
    * Optimistic write: update IndexedDB instantly (dirty), enqueue durably, then
    * send to the backend. On ack, adopt the committed version and clear dirty; on
    * failure, stay queued + dirty for retry (offline-capable).
+   *
+   * `op:"delete"` optimistically removes the row locally and queues a delete; the
+   * row reappears only if the send fails and a later reconcile re-adds it.
+   *
    * @param {(write:object)=>Promise<{id:string,committed_version:number}>} send
+   * @param {"upsert"|"delete"} [op="upsert"]
    */
-  async function optimisticWrite(table, id, row, send) {
+  async function optimisticWrite(table, id, row, send, op = "upsert") {
     const meta = await store.meta(table, id);
     const base_version = meta?.version ?? 0;
 
-    await store.put(table, id, row, { version: base_version, dirty: true });
-    const seq = await queue.enqueue({ id, table, op: "upsert", payload: row, base_version });
+    if (op === "delete") {
+      await store.del(table, id);
+    } else {
+      await store.put(table, id, row, { version: base_version, dirty: true });
+    }
+    const payload = op === "delete" ? null : row;
+    const seq = await queue.enqueue({ id, table, op, payload, base_version });
 
     try {
-      const ack = await send({ id, table, op: "upsert", payload: row, base_version });
-      const local = await store.meta(table, id);
-      const outcome = core.onAck(local, ack);
-      if (outcome && typeof outcome === "object" && "Adopt" in outcome) {
-        await store.setMeta(table, id, { version: outcome.Adopt, dirty: false });
-      }
+      const ack = await send({ id, table, op, payload, base_version });
+      const outcome = await _applyAck(table, id, ack);
       await queue.remove(seq);
-      return { status: "acked", version: outcome?.Adopt };
+      return {
+        status: "acked",
+        version: outcome && typeof outcome === "object" ? outcome.Adopt : undefined,
+      };
     } catch (err) {
+      // Stays queued (+ dirty for upserts) for the next flush. Offline-capable.
       return { status: "queued", error: String(err) };
     }
   }
 
+  /** Optimistically delete a row (see optimisticWrite with op:"delete"). */
+  function optimisticDelete(table, id, send) {
+    return optimisticWrite(table, id, null, send, "delete");
+  }
+
   /** Re-send everything still queued (call on reconnect). */
   async function flushQueue(send) {
+    let flushed = 0;
     for (const w of await queue.list()) {
       try {
         const ack = await send(w);
-        const local = await store.meta(w.table, w.id);
-        const outcome = core.onAck(local, ack);
-        if (outcome && typeof outcome === "object" && "Adopt" in outcome) {
-          await store.setMeta(w.table, w.id, { version: outcome.Adopt, dirty: false });
-        }
+        await _applyAck(w.table, w.id, ack);
         await queue.remove(w.seq);
+        flushed += 1;
       } catch {
         await queue.bumpAttempts(w.seq); // keep for the next flush
       }
     }
+    return flushed;
   }
 
-  return { applyChange, optimisticWrite, flushQueue };
+  /**
+   * Cold-start catch-up: reconcile a snapshot of authoritative rows fetched over
+   * HTTP (e.g. on connect / after a reconnect) so changes missed while offline
+   * land. Each row is run through the same reconcile path as a live change, so
+   * stale/duplicate rows are ignored and dirty local edits are never clobbered
+   * silently (they go through conflict resolution).
+   *
+   * With `prune:true` the snapshot is treated as the COMPLETE set for the table:
+   * clean local rows absent from it were deleted server-side and are removed.
+   * (Dirty rows — un-acked optimistic inserts — are kept.)
+   *
+   * @returns {Promise<{applied:number, ignored:number, conflicts:number, pruned:number}>}
+   */
+  async function hydrate(table, rows, { prune = false } = {}) {
+    const res = { applied: 0, ignored: 0, conflicts: 0, pruned: 0 };
+    const seen = new Set();
+    for (const row of rows ?? []) {
+      if (row == null || row.id == null) continue;
+      const id = String(row.id);
+      seen.add(id);
+      const outcome = await applyChange({
+        table,
+        op: "upsert",
+        id,
+        version: Number(row.version ?? 0),
+        row,
+        at_ms: 0,
+      });
+      if (outcome === "applied" || outcome === "echo-adopted") res.applied += 1;
+      else if (outcome === "conflict-resolved") res.conflicts += 1;
+      else res.ignored += 1;
+    }
+    if (prune) {
+      for (const local of await store.all(table)) {
+        const id = local?.id != null ? String(local.id) : null;
+        if (!id || seen.has(id)) continue;
+        const meta = await store.meta(table, id);
+        if (meta && !meta.dirty) {
+          await store.del(table, id);
+          res.pruned += 1;
+        }
+      }
+    }
+    return res;
+  }
+
+  return { applyChange, optimisticWrite, optimisticDelete, flushQueue, hydrate };
 }
