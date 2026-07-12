@@ -101,12 +101,13 @@ export function makeQueue(store) {
     async enqueue(write) {
       return promisify(q("readwrite").add({ ...write, attempts: 0 }));
     },
-    /** All queued writes in insertion order, each carrying its `seq`. */
+    /**
+     * All queued writes in insertion order, each carrying its `seq`. The store's
+     * keyPath is "seq" with autoIncrement, so IndexedDB injects the generated key
+     * into each record — no separate getAllKeys() round-trip needed.
+     */
     async list() {
-      const store2 = q("readonly");
-      const recs = await promisify(store2.getAll());
-      const keys = await promisify(store2.getAllKeys());
-      return recs.map((rec, i) => ({ ...rec, seq: keys[i] }));
+      return promisify(q("readonly").getAll());
     },
     async remove(seq) {
       await promisify(q("readwrite").delete(seq));
