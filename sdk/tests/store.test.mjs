@@ -1,3 +1,5 @@
+// Tests for the IndexedDB store + durable write-queue (store.mjs), run against
+// fake-indexeddb so no browser is needed.
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import { test } from "node:test";
