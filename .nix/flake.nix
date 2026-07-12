@@ -1,3 +1,5 @@
+# Nix flake defining the Fiducia dev shell (Rust + wasm toolchain, Node/pnpm,
+# and supporting tooling) used by `./shell` and direnv.
 {
   description = "Fiducia development environment";
 
