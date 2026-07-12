@@ -1,3 +1,6 @@
+# Crate manifest for fiducia-sync-core: the transport-agnostic sync core. Builds
+# as both rlib (native tests + server-side reuse) and cdylib (wasm); wasm-bindgen
+# is gated behind the optional `wasm` feature.
 [package]
 name = "fiducia-sync-core"
 version = "0.1.0"
