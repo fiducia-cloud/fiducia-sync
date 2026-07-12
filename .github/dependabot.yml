@@ -1,3 +1,5 @@
+# Dependabot config: weekly update PRs for the SDK's npm deps (under /sdk) and the
+# GitHub Actions used by CI.
 version: 2
 updates:
   # The JS/TS SDK (and its lockfile) lives under sdk/.
