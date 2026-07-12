@@ -1,3 +1,5 @@
+# CI: run the native Rust core tests, then build the node-target wasm from the
+# same crate and run the SDK's JS tests against it.
 name: ci
 on:
   push:
