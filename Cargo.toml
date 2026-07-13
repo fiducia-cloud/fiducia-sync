@@ -28,3 +28,10 @@ wasm = ["dep:wasm-bindgen"]
 # exact JSON the wasm ABI emits. serde_json is already a runtime dep; this exposes
 # it to the separate integration-test crate.
 serde_json = "1"
+
+# wasm-pack's bundled wasm-opt can lag Rust's emitted WebAssembly features and
+# currently rejects the multi-table module produced by stable rustc. The crate
+# is already compiled with Cargo's release profile, so keep packaging portable
+# instead of failing the build in an incompatible post-processing binary.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
