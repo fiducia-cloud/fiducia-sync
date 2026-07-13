@@ -187,3 +187,42 @@ test("hydrate catch-up applies newer rows, ignores stale, keeps dirty, prunes cl
   assert.equal(res.ignored, 1);
   assert.equal(res.pruned, 1);
 });
+
+test("two edits to the same row before an ack carry DISTINCT idempotency keys; retries reuse them", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "a" }, { version: 2, dirty: false });
+  const sent = [];
+  const offline = async (w) => {
+    sent.push(w);
+    throw new Error("offline");
+  };
+
+  // Both edits are made on top of version 2 (the first is never acked), so a
+  // key derived from (table,id,op,base_version) would collide and the server
+  // would silently dedupe the second edit away.
+  await client.optimisticWrite("api_keys", "k1", { name: "b" }, offline);
+  await client.optimisticWrite("api_keys", "k1", { name: "c" }, offline);
+
+  assert.equal(sent.length, 2);
+  assert.ok(sent[0].key, "first write carries a key");
+  assert.ok(sent[1].key, "second write carries a key");
+  assert.notEqual(sent[0].key, sent[1].key);
+  assert.equal(sent[0].base_version, sent[1].base_version); // the collision the key must survive
+
+  // The queue persisted the same keys, so a flush (or a reload) retries each
+  // write under its ORIGINAL key — a retry is deduped, a distinct write is not.
+  const resent = [];
+  let version = 2;
+  await client.flushQueue(async (w) => {
+    resent.push(w);
+    version += 1;
+    return { id: w.id, committed_version: version };
+  });
+  assert.deepEqual(
+    resent.map((w) => w.key),
+    sent.map((w) => w.key),
+  );
+  assert.equal((await queue.list()).length, 0);
+});
