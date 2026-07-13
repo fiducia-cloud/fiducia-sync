@@ -265,13 +265,17 @@ export function connectBackend({
  * it via SQLx and returns the committed row version. Plane-agnostic — pass the
  * plane's `pathPrefix` (customer: "/api/customer/sync", admin: "/api/admin/sync").
  * A stable Idempotency-Key makes retries safe (the server dedupes by it).
+ * Precedence: an explicit `opts.idempotencyKey`, else the write's own durable
+ * `key` (minted per queued write by the sync client, so two successive edits to
+ * the same row never collide), else — for writes from older queues that carry
+ * no key — the legacy `(table,id,op,base_version)` derivation.
  *
  * @param {string} baseUrl
- * @param {object} write   { id, table, op, payload, base_version }
+ * @param {object} write   { id, table, op, payload, base_version, key? }
  * @param {object} [opts]
  * @param {string} [opts.pathPrefix="/api/customer/sync"]
  * @param {()=>(string|Promise<string|null>)} [opts.getToken]
- * @param {string} [opts.idempotencyKey]  override the derived key
+ * @param {string} [opts.idempotencyKey]  override the key
  * @param {Function} [opts.fetchImpl=fetch]
  * @returns {Promise<{id:string, committed_version:number}>}
  */
