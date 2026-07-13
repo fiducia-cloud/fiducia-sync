@@ -142,6 +142,12 @@ pub struct QueuedWrite {
     pub payload: Value,
     /// The row version this write was made on top of (for conflict + echo detection).
     pub base_version: i64,
+    /// Client-minted idempotency/echo token for this write (the SDK mints one
+    /// per queued write). Doubles as the HTTP `Idempotency-Key` and — once the
+    /// backend echoes it in [`ChangeEvent::write_key`] — as the authoritative
+    /// own-echo discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl QueuedWrite {
@@ -152,14 +158,22 @@ impl QueuedWrite {
     }
 
     /// True if `incoming` is the realtime echo of this queued write.
+    ///
+    /// When both this write and the incoming change carry the client-minted
+    /// write token, the token alone decides: a match is our echo even if the
+    /// committed version drifted past `base_version + 1`, and a mismatch is a
+    /// third-party commit even if it landed at exactly `base_version + 1`.
+    /// Without a token on either side, the version heuristic applies.
     pub fn is_echo_of(&self, incoming: &ChangeEvent) -> bool {
-        incoming.table == self.table
-            && incoming.id == self.id
-            && incoming.op == self.op
-            && self
-                .base_version
-                .checked_add(1)
-                .is_some_and(|expected| incoming.version == expected)
+        if incoming.table != self.table || incoming.id != self.id || incoming.op != self.op {
+            return false;
+        }
+        if let (Some(mine), Some(theirs)) = (self.key.as_deref(), incoming.write_key.as_deref()) {
+            return mine == theirs;
+        }
+        self.base_version
+            .checked_add(1)
+            .is_some_and(|expected| incoming.version == expected)
     }
 }
 
