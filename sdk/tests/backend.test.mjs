@@ -213,3 +213,25 @@ test("backendSend throws on a non-2xx response; makeBackendSend binds config", a
     /token provider returned no token/,
   );
 });
+
+test("backendSend prefers the write's durable per-write key over the legacy derivation", async () => {
+  let captured;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return { ok: true, json: async () => ({ id: "k1", committed_version: 7 }) };
+  };
+  await backendSend(
+    "http://localhost",
+    { id: "k1", table: "api_keys", op: "upsert", base_version: 3, key: "w-unique-1" },
+    { fetchImpl },
+  );
+  assert.equal(captured.init.headers["idempotency-key"], "w-unique-1");
+
+  // An explicit override still wins over both.
+  await backendSend(
+    "http://localhost",
+    { id: "k1", table: "api_keys", op: "upsert", base_version: 3, key: "w-unique-1" },
+    { fetchImpl, idempotencyKey: "explicit" },
+  );
+  assert.equal(captured.init.headers["idempotency-key"], "explicit");
+});
