@@ -4,7 +4,7 @@ The JavaScript half of the local-first sync SDK: a thin, build-step-free ESM
 shim that wraps the `fiducia-sync-core` WASM (built from the repo's Rust crate)
 and owns all the browser IO the core deliberately avoids.
 
-- `src/` — the shim: IndexedDB store + durable write-queue, the reconcile client,
+- `src/` — the shim: migration-safe IndexedDB store + durable write-queue, the reconcile client,
   the two transports (Supabase realtime + backend WS/SSE), the wasm adapter, the
   `startSync` bring-up, and the htmx optimistic extension.
 - `admin/` — esbuild entry that bundles the SDK (wasm inlined) into one file the

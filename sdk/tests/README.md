@@ -6,7 +6,9 @@ pkg-node`), so there is one source of truth for the sync logic across Rust and J
 IndexedDB and sockets are faked (`fake-indexeddb`, injected WS/SSE/timer impls),
 so nothing here needs a browser or a live server.
 
-- `client.test.mjs` — reconcile client against the real wasm core + fake IndexedDB.
-- `store.test.mjs` — IndexedDB store + durable write-queue.
-- `backend.test.mjs` — backend WS/SSE transport, reconnect, and write path.
+- `client.test.mjs` — reconcile client against the real wasm core, including
+  own-echo suppression and observable durable flush failures.
+- `store.test.mjs` — IndexedDB store, schema upgrades, and durable write-queue.
+- `backend.test.mjs` — backend WS/SSE transport, reconnect, credential placement,
+  fail-closed auth, and write path.
 - `transports.test.mjs` — pure decoders and the htmx optimistic-intent parser.

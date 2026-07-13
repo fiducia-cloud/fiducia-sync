@@ -19,7 +19,7 @@ import { subscribeSupabase } from "./transports/supabase.mjs";
  * @param {string}   o.dbName            per-plane IndexedDB name ("fiducia-customer"/"fiducia-admin")
  * @param {string[]} o.tables            synced tables
  * @param {object}   [o.core]            a wrapped core; defaults to loadBrowserCore()
- * @param {object|false} [o.backend]     { baseUrl, wsPath?, ssePath?, pathPrefix?, getToken? }
+ * @param {object|false} [o.backend]     { baseUrl, wsPath?, ssePath?, pathPrefix?, getToken?, streamAuth? }
  * @param {object|false} [o.supabase]    { client, filter?, channelName? }
  * @param {(table:string)=>Promise<object[]>} [o.hydrateFetch] catch-up snapshot fetch
  * @param {(status:string, err?:Error)=>void} [o.onStatus]
@@ -42,6 +42,11 @@ export async function startSync({
   const client = makeSyncClient({ store, queue, core: resolvedCore });
   const stops = [];
 
+  const report = (status, error) => {
+    if (onStatus) onStatus(status, error);
+    else if (error) console.error(`[fiducia-sync] ${status}: ${error.message ?? String(error)}`);
+  };
+
   const send = backend
     ? makeBackendSend(backend.baseUrl, {
         pathPrefix: backend.pathPrefix,
@@ -59,7 +64,7 @@ export async function startSync({
           const rows = await hydrateFetch(table);
           await client.hydrate(table, rows, { prune: hydratePrune });
         } catch (e) {
-          onStatus?.("hydrate-error", e);
+          report("hydrate-error", e);
         }
       }
     } finally {
@@ -67,23 +72,43 @@ export async function startSync({
     }
   }
 
-  if (backend) {
-    const conn = connectBackend({
-      baseUrl: backend.baseUrl,
-      wsPath: backend.wsPath,
-      ssePath: backend.ssePath,
-      getToken: backend.getToken,
-      onChanges: (changes) => {
-        for (const c of changes) void client.applyChange(c);
-      },
-      onStatus: (s) => {
-        onStatus?.(`backend:${s}`);
-        if (s === "open") {
-          void hydrateAll();
-          if (send) void client.flushQueue(send);
-        }
-      },
+  const applyIncoming = (change) => {
+    void client.applyChange(change).catch((error) => {
+      report("apply-error", error);
     });
+  };
+
+  const flushQueued = () => {
+    if (!send) return;
+    void client.flushQueue(send).catch((error) => {
+      report("flush-error", error);
+    });
+  };
+
+  if (backend) {
+    let conn;
+    try {
+      conn = connectBackend({
+        baseUrl: backend.baseUrl,
+        wsPath: backend.wsPath,
+        ssePath: backend.ssePath,
+        getToken: backend.getToken,
+        streamAuth: backend.streamAuth,
+        onChanges: (changes) => {
+          for (const change of changes) applyIncoming(change);
+        },
+        onStatus: (status, error) => {
+          report(`backend:${status}`, error);
+          if (status === "open") {
+            void hydrateAll();
+            flushQueued();
+          }
+        },
+      });
+    } catch (error) {
+      store.close();
+      throw error;
+    }
     stops.push(() => conn.stop());
   }
 
@@ -93,9 +118,9 @@ export async function startSync({
       tables,
       filter: supabase.filter,
       channelName: supabase.channelName,
-      onChange: (c) => void client.applyChange(c),
-      onStatus: (s) => {
-        onStatus?.(`supabase:${s}`);
+      onChange: applyIncoming,
+      onStatus: (s, error) => {
+        report(`supabase:${s}`, error);
         if (s === "SUBSCRIBED") void hydrateAll();
       },
     });
@@ -115,8 +140,8 @@ export async function startSync({
       for (const s of stops) {
         try {
           s();
-        } catch {
-          /* best-effort */
+        } catch (error) {
+          report("stop-error", error);
         }
       }
       store.close();

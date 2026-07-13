@@ -27,6 +27,39 @@ export function makeSyncClient({ store, queue, core }) {
   /** Reconcile one incoming committed change against the local store. */
   async function applyChange(event) {
     const local = await store.meta(event.table, event.id); // {version,dirty}|null
+    const items = await queue.list();
+    const echo = items.find((write) => core.isOwnEcho(write, event));
+
+    if (echo) {
+      // This is the transport echo of a write already applied optimistically.
+      // Adopt only its committed version instead of writing the same payload
+      // through IndexedDB a second time. This also catches delete echoes, where
+      // the optimistic delete means `local` is already absent and reconcile()
+      // would otherwise return AlreadyApplied without dequeuing the write.
+      const hasNewerLocalWrite = items.some(
+        (write) =>
+          write.seq !== echo.seq &&
+          write.table === event.table &&
+          write.id === event.id,
+      );
+      if (event.op === "delete") {
+        if (local && !hasNewerLocalWrite) await store.del(event.table, event.id);
+      } else if (local) {
+        await store.setMeta(event.table, event.id, {
+          version: event.version,
+          dirty: hasNewerLocalWrite,
+        });
+      } else {
+        // The optimistic row disappeared independently; restore convergence
+        // from server truth because there is no local write left to re-apply.
+        await applyServer(event);
+      }
+      // Metadata first, dequeue second: a crash can cause a harmless idempotent
+      // retry, but can never lose the only durable record of an un-applied write.
+      await queue.remove(echo.seq);
+      return "echo-adopted";
+    }
+
     const decision = core.reconcile(local, event);
 
     if (decision === "Apply") {
@@ -35,14 +68,6 @@ export function makeSyncClient({ store, queue, core }) {
     }
 
     if (decision === "Conflict") {
-      const items = await queue.list();
-      const echo = items.find((w) => core.isOwnEcho(w, event));
-      if (echo) {
-        // The realtime echo of our OWN write — adopt server truth, dequeue.
-        await applyServer(event);
-        await queue.remove(echo.seq);
-        return "echo-adopted";
-      }
       // A genuine conflict (someone else advanced past our dirty edit).
       // Default policy is server-wins: apply server truth and drop our now-stale
       // queued write(s) for this row so we don't clobber newer data on retry.
@@ -103,8 +128,21 @@ export function makeSyncClient({ store, queue, core }) {
         version: outcome && typeof outcome === "object" ? outcome.Adopt : undefined,
       };
     } catch (err) {
+      // Persist the failed attempt before reporting it. If an own echo already
+      // dequeued this seq concurrently, the write is committed despite the lost
+      // HTTP ack and can be reported as acknowledged.
+      let attempts;
+      try {
+        attempts = await queue.bumpAttempts(seq);
+      } catch (storageError) {
+        const failure = new Error("sync write failed and retry state was not durable");
+        failure.cause = storageError;
+        failure.sendError = err;
+        throw failure;
+      }
+      if (attempts === 0) return { status: "acked", via: "echo" };
       // Stays queued (+ dirty for upserts) for the next flush. Offline-capable.
-      return { status: "queued", error: String(err) };
+      return { status: "queued", error: String(err), attempts };
     }
   }
 
@@ -113,18 +151,55 @@ export function makeSyncClient({ store, queue, core }) {
     return optimisticWrite(table, id, null, send, "delete");
   }
 
-  /** Re-send everything still queued (call on reconnect). */
-  async function flushQueue(send) {
+  /**
+   * Re-send everything still queued (call on reconnect).
+   *
+   * Successful writes are removed only after their ack is applied durably.
+   * Failed attempts remain queued with a durable counter. After processing the
+   * batch, failures reject with a `QueueFlushError` carrying `failures` and the
+   * successful `flushed` count instead of disappearing silently.
+   */
+  async function flushQueue(send, { onError } = {}) {
     let flushed = 0;
+    const failures = [];
     for (const w of await queue.list()) {
       try {
         const ack = await send(w);
         await _applyAck(w.table, w.id, ack);
         await queue.remove(w.seq);
         flushed += 1;
-      } catch {
-        await queue.bumpAttempts(w.seq); // keep for the next flush
+      } catch (error) {
+        let attempts;
+        try {
+          attempts = await queue.bumpAttempts(w.seq); // keep for the next flush
+        } catch (storageError) {
+          const durabilityError = new Error(
+            "queue retry attempt could not be persisted",
+          );
+          durabilityError.cause = storageError;
+          durabilityError.sendError = error;
+          failures.push({ write: w, error: durabilityError, attempts: null });
+          onError?.(durabilityError, w, null);
+          continue;
+        }
+        if (attempts === 0) {
+          // A realtime own echo removed this queue entry while the HTTP request
+          // lost its ack. The committed version has already been adopted.
+          flushed += 1;
+          continue;
+        }
+        failures.push({ write: w, error, attempts });
+        onError?.(error, w, attempts);
       }
+    }
+    if (failures.length > 0) {
+      const error = new Error(
+        `queue flush failed for ${failures.length} write(s); ${flushed} flushed`,
+      );
+      error.name = "QueueFlushError";
+      error.failures = failures;
+      error.flushed = flushed;
+      throw error;
     }
     return flushed;
   }
