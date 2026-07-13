@@ -47,6 +47,14 @@ pub struct ChangeEvent {
     pub row: Value,
     #[serde(default)]
     pub at_ms: i64,
+    /// The client-minted write token ([`QueuedWrite::key`]) echoed back by the
+    /// backend when this change was caused by a sync write. When present on
+    /// BOTH sides, echo matching keys on the token instead of the
+    /// `base_version + 1` heuristic, which cannot distinguish our own echo from
+    /// a third-party commit landing at exactly the same version. Absent (older
+    /// backends, Supabase CDC), matching falls back to the version heuristic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_key: Option<String>,
 }
 
 /// The sync-relevant metadata a caller holds for a row in IndexedDB. `dirty` is
