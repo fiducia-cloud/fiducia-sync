@@ -294,6 +294,7 @@ export async function backendSend(baseUrl, write, opts = {}) {
 
   const key =
     idempotencyKey ??
+    write.key ??
     `${write.table}:${write.id}:${write.op ?? "upsert"}:${write.base_version}`;
   const headers = { "content-type": "application/json", "idempotency-key": key };
   if (getToken) {
