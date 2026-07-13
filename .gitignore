@@ -14,3 +14,13 @@ sdk/admin/dist/
 # Scratch / git worktrees (tmp/worktrees/*)
 tmp/
 pkg-node/
+
+# --- hardened baseline (auto) ---
+Thumbs.db
+*.swp
+*~
+.direnv/
+/target
+**/*.rs.bk
+*.pdb
+.cargo-target-*/
