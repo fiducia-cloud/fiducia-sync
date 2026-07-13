@@ -50,7 +50,9 @@ All reconcile decisions use the per-row `version`, and local state transitions
 are serialized, so the two transports can deliver changes in any order and
 converge. A re-seen clean version refreshes the authoritative payload
 (idempotently) so an HTTP ack that arrived before a server-normalized echo cannot
-hide that echo. Row shapes are the generated types from
+hide that echo. The `bump_row_version` trigger and global sequence allocation in
+`fiducia-interfaces/sql/{customer,admin}.sql` are the database source of those
+ordering guarantees. Row shapes are the generated types from
 `@fiducia/interfaces/db/*`; the
 `{table, op, id, version, row, at_ms, write_key?}` change envelope is this SDK's
 contract (it is distinct from the KV/election `ChangeEvent` in
