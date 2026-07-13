@@ -11,7 +11,7 @@ The correctness-critical logic lives in **`fiducia-sync-core`** (this crate) —
 version reconciliation, conflict policy, and the optimistic write-queue ack
 rules, with **zero IO**. It builds:
 
-- **native** (`cargo test`) — verified here, and reusable **server-side** so the
+- **native** (`cargo test --locked`) — verified here, and reusable **server-side** so the
   Rust backends and the browser agree on one sync protocol; and
 - **wasm** (`--features wasm`, via `wasm-bindgen`) — the browser core.
 
@@ -37,13 +37,18 @@ browser IO:
                         #   → reconcile on ack; offline-capable
 ```
 
-## The ordering key
+## Ordering: row versions and the catch-up cursor
 
-Every synced Postgres row carries a monotonic `version` (the `bump_row_version`
-trigger in `fiducia-interfaces` — note it advances on UPDATE; INSERT lands at the
-`default 1`). All reconcile decisions use `version` alone, and local state
-transitions are serialized, so the two transports can deliver changes in any
-order and converge. A re-seen clean version refreshes the authoritative payload
+Every synced Postgres row has two deliberately different monotonic values. Its
+per-row `version` is the compare-and-swap and reconciliation key; the plane-wide
+`sync_sequence` is the commit-ordered HTTP catch-up cursor. Durable tombstones
+carry deletes through that same global cursor. The client advances a catch-up
+cursor only through the last returned sequence, but feeds each change's row
+`version`—never its `sync_sequence`—into reconciliation.
+
+All reconcile decisions use the per-row `version`, and local state transitions
+are serialized, so the two transports can deliver changes in any order and
+converge. A re-seen clean version refreshes the authoritative payload
 (idempotently) so an HTTP ack that arrived before a server-normalized echo cannot
 hide that echo. Row shapes are the generated types from
 `@fiducia/interfaces/db/*`; the
@@ -188,17 +193,21 @@ See `docs/repo-boundaries.md`.
 ## Develop
 
 ```sh
-./shell cargo test          # core logic (no browser/wasm needed)
+./shell cargo test --locked          # core logic (no browser/wasm needed)
 
 # SDK tests use the real node-target WASM core.
-wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm
+wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm --locked
 npm --prefix sdk test
 
 # Browser WASM package. Needs a rustup toolchain WITH the wasm32-unknown-unknown
 # target — a Homebrew-only rustc will not work (no wasm std in its sysroot). If
 # `rustc` resolves to Homebrew, put the rustup toolchain first, e.g.:
 #   PATH="$(dirname "$(rustup which rustc)"):$PATH" wasm-pack build ...
-wasm-pack build --target bundler --out-dir pkg -- --features wasm
+wasm-pack build --target bundler --out-dir pkg -- --features wasm --locked
 ```
 
 The `pkg/` output (gitignored) is the wasm module the TS shim imports.
+
+The root Dockerfile is a locked **test image**, not a network service or browser
+runtime. It copies `Cargo.lock`, resolves with `--locked`, and builds and runs as
+numeric UID/GID `65532:65532`; it exposes no port and starts no daemon.

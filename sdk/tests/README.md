@@ -2,7 +2,8 @@
 
 `node --test` suites for the JS SDK. The client/reconcile tests import the REAL
 node-target wasm core (built by `wasm-pack build --target nodejs --out-dir
-pkg-node`), so there is one source of truth for the sync logic across Rust and JS.
+pkg-node -- --features wasm --locked`), so there is one source of truth for the
+sync logic across Rust and JS.
 IndexedDB and sockets are faked (`fake-indexeddb`, injected WS/SSE/timer impls),
 so nothing here needs a browser or a live server.
 
