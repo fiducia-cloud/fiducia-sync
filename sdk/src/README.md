@@ -10,12 +10,15 @@ stay in the Rust/WASM core.
 - `store.mjs` — IndexedDB persistence: one DB per plane, one object store per
   table, plus the durable `_queue` store for optimistic writes. It
   version-upgrades existing databases when tables are added and awaits
-  transaction completion.
+  transaction completion; optimistic mutations enqueue atomically, and
+  ack/echo settlement and server-wins conflict adoption remove retries atomically.
 - `client.mjs` — the reconcile client: `applyChange`, `optimisticWrite/Delete`,
-  observable/durable `flushQueue`, cold-start `hydrate`. Own echoes adopt only
-  committed metadata rather than replaying local payloads. Transport-agnostic.
+  observable/durable `flushQueue`, cold-start `hydrate`. Local transitions are
+  serialized without holding the gate over network IO; exact echoes adopt the
+  authoritative payload unless a newer optimistic write remains. Transport-agnostic.
 - `start.mjs` — `startSync`, the one-call bring-up that feeds BOTH transports into
-  one client per plane, with catch-up hydration + queue flush on (re)connect.
+  one client per plane, with catch-up hydration + queue flush on (re)connect and
+  write-header options (bearer and CSRF) forwarded to the backend sender.
 - `htmx.mjs` — the `fiducia-optimistic` htmx extension (write-through local-first
   store on `hx-post`/`hx-put`).
 - `transports/` — the two change sources (Supabase realtime + backend WS/SSE) and

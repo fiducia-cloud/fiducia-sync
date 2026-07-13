@@ -8,7 +8,9 @@ wasm (feature `wasm`) for the browser.
 
 - `lib.rs` — the core types and pure decision functions: `ChangeEvent`,
   `LocalRow`, `QueuedWrite`, `reconcile()`, `resolve_conflict()`, `on_ack()`, plus
-  the full unit-test suite. Ordering is by a single monotonic Postgres `version`.
+  the full unit-test suite. Ordering is by a single monotonic Postgres `version`;
+  keyed own-echo detection is exact and the legacy version heuristic cannot
+  overflow.
 - `wasm.rs` — thin `wasm-bindgen` bindings (JSON string in/out) exposing
   `reconcile`, `on_ack`, and `is_own_echo` to the JS shim; compiled only under
   `--features wasm`.

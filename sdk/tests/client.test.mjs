@@ -29,8 +29,8 @@ test("applyChange applies a newer server change (clean) and ignores a stale one"
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "a" });
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 1, dirty: false });
 
-  assert.equal(await client.applyChange(change({ version: 1, row: { name: "b" } })), "ignored"); // already-applied
-  assert.deepEqual(await store.get("api_keys", "k1"), { name: "a" });
+  assert.equal(await client.applyChange(change({ version: 1, row: { name: "b" } })), "refreshed");
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "b" }); // equal-version server truth refreshes
 });
 
 test("optimisticWrite is instant + dirty, then adopts the committed version on ack", async (t) => {
@@ -76,9 +76,9 @@ test("the echo of our own write is adopted, not flagged as a conflict", async (t
     change({ version: 3, row: { name: "server-normalized" } }),
   );
   assert.equal(r, "echo-adopted");
-  // The optimistic value was already applied locally; the transport echo only
-  // adopts metadata and must not write the payload through IndexedDB again.
-  assert.deepEqual(await store.get("api_keys", "k1"), { name: "b" });
+  // The exact echo is authoritative: server normalization replaces the
+  // optimistic payload when no newer local edit remains.
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "server-normalized" });
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
   assert.equal((await queue.list()).length, 0);
 });

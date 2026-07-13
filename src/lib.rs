@@ -47,6 +47,14 @@ pub struct ChangeEvent {
     pub row: Value,
     #[serde(default)]
     pub at_ms: i64,
+    /// The client-minted write token ([`QueuedWrite::key`]) echoed back by the
+    /// backend when this change was caused by a sync write. A newly queued
+    /// write carries a key, so only the same key can identify its echo; a
+    /// missing or different event key is treated as an ordinary server change.
+    /// The `base_version + 1` heuristic remains only for legacy queued records
+    /// that predate write keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_key: Option<String>,
 }
 
 /// The sync-relevant metadata a caller holds for a row in IndexedDB. `dirty` is
@@ -75,7 +83,7 @@ pub enum Reconcile {
     /// Local has an un-acked optimistic edit AND the server advanced past it.
     /// Resolve via [`resolve_conflict`] (default: server wins). NB: an echo of
     /// our OWN in-flight write is not a real conflict — callers should match it
-    /// against the write-queue via [`QueuedWrite::expected_version`] first.
+    /// against the write-queue via [`QueuedWrite::is_echo_of`] first.
     Conflict,
 }
 
@@ -134,6 +142,12 @@ pub struct QueuedWrite {
     pub payload: Value,
     /// The row version this write was made on top of (for conflict + echo detection).
     pub base_version: i64,
+    /// Client-minted idempotency/echo token for this write (the SDK mints one
+    /// per queued write). Doubles as the HTTP `Idempotency-Key` and — once the
+    /// backend echoes it in [`ChangeEvent::write_key`] — as the authoritative
+    /// own-echo discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 impl QueuedWrite {
@@ -144,14 +158,21 @@ impl QueuedWrite {
     }
 
     /// True if `incoming` is the realtime echo of this queued write.
+    ///
+    /// A keyed write requires an exact event-token match: a match is our echo
+    /// even if the committed version drifted past `base_version + 1`, while a
+    /// missing or different token is not our echo even at exactly that version.
+    /// Only legacy queue records with no key use the version heuristic.
     pub fn is_echo_of(&self, incoming: &ChangeEvent) -> bool {
-        incoming.table == self.table
-            && incoming.id == self.id
-            && incoming.op == self.op
-            && self
-                .base_version
-                .checked_add(1)
-                .is_some_and(|expected| incoming.version == expected)
+        if incoming.table != self.table || incoming.id != self.id || incoming.op != self.op {
+            return false;
+        }
+        if let Some(mine) = self.key.as_deref() {
+            return incoming.write_key.as_deref() == Some(mine);
+        }
+        self.base_version
+            .checked_add(1)
+            .is_some_and(|expected| incoming.version == expected)
     }
 }
 
@@ -192,6 +213,7 @@ mod tests {
             version,
             row: json!({ "name": "prod" }),
             at_ms: 1000,
+            write_key: None,
         }
     }
 
@@ -264,6 +286,7 @@ mod tests {
             op: ChangeOp::Upsert,
             payload: json!({ "name": "prod" }),
             base_version: 5,
+            key: None,
         };
         assert_eq!(queued.expected_version(), 6);
         assert!(queued.is_echo_of(&ev(ChangeOp::Upsert, 6))); // our own commit echoing back
@@ -280,6 +303,29 @@ mod tests {
         };
         assert_eq!(overflow.expected_version(), i64::MAX);
         assert!(!overflow.is_echo_of(&ev(ChangeOp::Upsert, i64::MAX)));
+    }
+
+    #[test]
+    fn keyed_echo_requires_the_exact_token() {
+        let queued = QueuedWrite {
+            id: "k1".into(),
+            table: "api_keys".into(),
+            op: ChangeOp::Upsert,
+            payload: json!({ "name": "mine" }),
+            base_version: 5,
+            key: Some("write-mine".into()),
+        };
+
+        let mut incoming = ev(ChangeOp::Upsert, 99);
+        incoming.write_key = Some("write-mine".into());
+        assert!(queued.is_echo_of(&incoming));
+
+        incoming.version = 6;
+        incoming.write_key = Some("write-someone-else".into());
+        assert!(!queued.is_echo_of(&incoming));
+
+        incoming.write_key = None;
+        assert!(!queued.is_echo_of(&incoming));
     }
 
     #[test]

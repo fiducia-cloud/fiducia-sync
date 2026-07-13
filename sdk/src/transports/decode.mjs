@@ -1,6 +1,7 @@
 // Pure transport decoders — payloads -> ChangeEvent(s). No IO, so unit-testable.
-// A ChangeEvent is { table, op:"upsert"|"delete", id, version, row, at_ms }, the
-// same envelope the wasm core + `@fiducia/interfaces` generated types use.
+// A ChangeEvent is
+// { table, op:"upsert"|"delete", id, version, row, at_ms, write_key? }, the same
+// envelope the wasm core + `@fiducia/interfaces` generated types use.
 
 export function isChangeEvent(v) {
   return (
@@ -9,7 +10,8 @@ export function isChangeEvent(v) {
     typeof v.table === "string" &&
     (v.op === "upsert" || v.op === "delete") &&
     typeof v.id === "string" &&
-    typeof v.version === "number"
+    Number.isSafeInteger(v.version) &&
+    (v.write_key == null || typeof v.write_key === "string")
   );
 }
 
@@ -46,13 +48,14 @@ export function decodeSupabaseChange(table, payload) {
   // `version` must be a real number to order the change — bail rather than
   // invent a stale 0 that would drop the change.
   const rawVersion = row.version ?? payload.new?.version ?? payload.old?.version;
-  if (rawVersion == null || Number.isNaN(Number(rawVersion))) return null;
+  const version = Number(rawVersion);
+  if (!Number.isSafeInteger(version)) return null;
 
   return {
     table,
     op: isDelete ? "delete" : "upsert",
     id: String(row.id),
-    version: Number(rawVersion),
+    version,
     row,
     at_ms: payload.commit_timestamp ? Date.parse(payload.commit_timestamp) || 0 : 0,
   };

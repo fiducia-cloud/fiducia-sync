@@ -10,7 +10,7 @@
  * @param {object} deps
  * @param {object} deps.store  from openStore()
  * @param {object} deps.queue  from makeQueue(store)
- * @param {object} deps.core   from wrapCore(wasm) — { reconcile, onAck, isOwnEcho }
+ * @param {object} deps.core   from wrapCore(wasm) — { reconcile, isOwnEcho }
  */
 // A per-write idempotency identity, minted once when the write is enqueued and
 // persisted with it. Retries of the SAME queued write (flushQueue, reload) reuse
@@ -22,7 +22,38 @@ const mintWriteKey = () =>
   globalThis.crypto?.randomUUID?.() ??
   `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
+function validateAck(write, ack) {
+  if (!ack || typeof ack !== "object") {
+    throw new Error("sync write acknowledgement is not an object");
+  }
+  if (ack.id !== write.id) {
+    throw new Error("sync write acknowledgement id does not match the queued write");
+  }
+  if (
+    !Number.isSafeInteger(ack.committed_version) ||
+    ack.committed_version < 0
+  ) {
+    throw new Error("sync write acknowledgement has an invalid committed_version");
+  }
+  return ack;
+}
+
 export function makeSyncClient({ store, queue, core }) {
+  // Reconcile decisions span multiple IndexedDB reads/writes. Serialize those
+  // local state transitions so two transport callbacks cannot both decide from
+  // the same old version and land out of order. Network sends deliberately stay
+  // outside the gate: their realtime echo must be able to reconcile while the
+  // HTTP response is still in flight.
+  let mutationTail = Promise.resolve();
+  function mutate(operation) {
+    const run = mutationTail.then(operation, operation);
+    mutationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   async function applyServer(event) {
     if (event.op === "delete") {
       await store.del(event.table, event.id);
@@ -35,42 +66,40 @@ export function makeSyncClient({ store, queue, core }) {
   }
 
   /** Reconcile one incoming committed change against the local store. */
-  async function applyChange(event) {
+  async function _applyChange(event) {
     const local = await store.meta(event.table, event.id); // {version,dirty}|null
     const items = await queue.list();
-    const echo = items.find((write) => core.isOwnEcho(write, event));
+    const rowWrites = items.filter(
+      (write) => write.table === event.table && write.id === event.id,
+    );
+    const echo = rowWrites.find((write) => core.isOwnEcho(write, event));
 
     if (echo) {
-      // This is the transport echo of a write already applied optimistically.
-      // Adopt only its committed version instead of writing the same payload
-      // through IndexedDB a second time. This also catches delete echoes, where
-      // the optimistic delete means `local` is already absent and reconcile()
-      // would otherwise return AlreadyApplied without dequeuing the write.
-      const hasNewerLocalWrite = items.some(
-        (write) =>
-          write.seq !== echo.seq &&
-          write.table === event.table &&
-          write.id === event.id,
-      );
-      if (event.op === "delete") {
-        if (local && !hasNewerLocalWrite) await store.del(event.table, event.id);
-      } else if (local) {
-        await store.setMeta(event.table, event.id, {
-          version: event.version,
-          dirty: hasNewerLocalWrite,
-        });
-      } else {
-        // The optimistic row disappeared independently; restore convergence
-        // from server truth because there is no local write left to re-apply.
-        await applyServer(event);
-      }
-      // Metadata first, dequeue second: a crash can cause a harmless idempotent
-      // retry, but can never lose the only durable record of an un-applied write.
-      await queue.remove(echo.seq);
-      return "echo-adopted";
+      // The exact-key echo is authoritative. Adopt its server-normalized payload
+      // when it is the newest local intent, or preserve a later optimistic value;
+      // row + queue changes commit in one IndexedDB transaction.
+      if (await queue.adoptEcho(event, echo.seq)) return "echo-adopted";
+      // Another tab may have retired the sequence after our queue snapshot. Run
+      // the event through ordinary reconciliation against the now-current state.
+      return _applyChange(event);
     }
 
-    const decision = core.reconcile(local, event);
+    // The durable queue is the source of truth for pending intent. It also
+    // represents optimistic deletes, for which no local row exists, and repairs
+    // a crash window where committed metadata could precede queue cleanup.
+    const reconcileLocal =
+      rowWrites.length === 0
+        ? local
+        : {
+            version:
+              local?.version ??
+              rowWrites.reduce(
+                (latest, write) => Math.max(latest, write.base_version),
+                rowWrites[0].base_version,
+              ),
+            dirty: true,
+          };
+    const decision = core.reconcile(reconcileLocal, event);
 
     if (decision === "Apply") {
       await applyServer(event);
@@ -79,31 +108,41 @@ export function makeSyncClient({ store, queue, core }) {
 
     if (decision === "Conflict") {
       // A genuine conflict (someone else advanced past our dirty edit).
-      // Default policy is server-wins: apply server truth and drop our now-stale
-      // queued write(s) for this row so we don't clobber newer data on retry.
-      await applyServer(event);
-      for (const w of items) {
-        if (w.id === event.id && w.table === event.table) await queue.remove(w.seq);
-      }
+      // Default policy is server-wins. Adopt server truth and drop every stale
+      // write for this row in ONE IndexedDB transaction, so a reload can never
+      // retry an old write after the newer server state has landed locally.
+      const staleSeqs = rowWrites.map((w) => w.seq);
+      await queue.resolveConflict(event, staleSeqs);
       return "conflict-resolved";
     }
 
+    if (
+      decision &&
+      typeof decision === "object" &&
+      decision.Ignore === "AlreadyApplied" &&
+      rowWrites.length === 0 &&
+      (!local || !local.dirty)
+    ) {
+      // A version-only HTTP ack can arrive before its authoritative realtime
+      // echo. Refresh equal-version clean state so server normalization (or an
+      // equal-version catch-up row after reload) is never discarded.
+      await applyServer(event);
+      return "refreshed";
+    }
+
     return "ignored"; // {Ignore: "Stale" | "AlreadyApplied"}
+  }
+
+  function applyChange(event) {
+    return mutate(() => _applyChange(event));
   }
 
   // Apply a server ack against current local state. Returns the AckOutcome so
   // callers can report the adopted version. `Superseded` means a newer change
   // already landed locally (via applyChange, which already cleared dirty), so we
   // leave local untouched; either way the queued write is done and dequeued.
-  async function _applyAck(table, id, ack) {
-    const local = await store.meta(table, id);
-    // No local row (e.g. an optimistic delete already removed it): nothing to adopt.
-    if (!local) return "Superseded";
-    const outcome = core.onAck(local, ack);
-    if (outcome && typeof outcome === "object" && "Adopt" in outcome) {
-      await store.setMeta(table, id, { version: outcome.Adopt, dirty: false });
-    }
-    return outcome;
+  async function _applyAck(table, id, ack, settledSeq) {
+    return queue.settleAck(table, id, settledSeq, ack.committed_version);
   }
 
   /**
@@ -118,25 +157,24 @@ export function makeSyncClient({ store, queue, core }) {
    * @param {"upsert"|"delete"} [op="upsert"]
    */
   async function optimisticWrite(table, id, row, send, op = "upsert") {
-    const meta = await store.meta(table, id);
-    const base_version = meta?.version ?? 0;
-
-    if (op === "delete") {
-      await store.del(table, id);
-    } else {
-      await store.put(table, id, row, { version: base_version, dirty: true });
-    }
-    const payload = op === "delete" ? null : row;
-    // `key` rides along durably so every retry of this write (here or from
-    // flushQueue after a reload) presents the same Idempotency-Key, while a
-    // subsequent distinct write to the same row never shares it.
-    const write = { id, table, op, payload, base_version, key: mintWriteKey() };
-    const seq = await queue.enqueue(write);
+    const { write, seq } = await mutate(async () => {
+      const meta = await store.meta(table, id);
+      const base_version = meta?.version ?? 0;
+      const payload = op === "delete" ? null : row;
+      // `key` rides along durably so every retry of this write (here or from
+      // flushQueue after a reload) presents the same Idempotency-Key, while a
+      // subsequent distinct write to the same row never shares it.
+      const write = { id, table, op, payload, base_version, key: mintWriteKey() };
+      // The optimistic row mutation and queue append commit atomically. Splitting
+      // them into two transactions would allow a crash to leave a dirty row (or a
+      // deleted row) with no durable retry intent.
+      const seq = await queue.enqueueOptimistic(write, row);
+      return { write, seq };
+    });
 
     try {
-      const ack = await send(write);
-      const outcome = await _applyAck(table, id, ack);
-      await queue.remove(seq);
+      const ack = validateAck(write, await send(write));
+      const outcome = await mutate(() => _applyAck(table, id, ack, seq));
       return {
         status: "acked",
         version: outcome && typeof outcome === "object" ? outcome.Adopt : undefined,
@@ -147,7 +185,7 @@ export function makeSyncClient({ store, queue, core }) {
       // HTTP ack and can be reported as acknowledged.
       let attempts;
       try {
-        attempts = await queue.bumpAttempts(seq);
+        attempts = await mutate(() => queue.bumpAttempts(seq));
       } catch (storageError) {
         const failure = new Error("sync write failed and retry state was not durable");
         failure.cause = storageError;
@@ -176,16 +214,15 @@ export function makeSyncClient({ store, queue, core }) {
   async function flushQueue(send, { onError } = {}) {
     let flushed = 0;
     const failures = [];
-    for (const w of await queue.list()) {
+    for (const w of await mutate(() => queue.list())) {
       try {
-        const ack = await send(w);
-        await _applyAck(w.table, w.id, ack);
-        await queue.remove(w.seq);
+        const ack = validateAck(w, await send(w));
+        await mutate(() => _applyAck(w.table, w.id, ack, w.seq));
         flushed += 1;
       } catch (error) {
         let attempts;
         try {
-          attempts = await queue.bumpAttempts(w.seq); // keep for the next flush
+          attempts = await mutate(() => queue.bumpAttempts(w.seq)); // keep for the next flush
         } catch (storageError) {
           const durabilityError = new Error(
             "queue retry attempt could not be persisted",
@@ -231,14 +268,14 @@ export function makeSyncClient({ store, queue, core }) {
    *
    * @returns {Promise<{applied:number, ignored:number, conflicts:number, pruned:number}>}
    */
-  async function hydrate(table, rows, { prune = false } = {}) {
+  async function _hydrate(table, rows, { prune = false } = {}) {
     const res = { applied: 0, ignored: 0, conflicts: 0, pruned: 0 };
     const seen = new Set();
     for (const row of rows ?? []) {
       if (row == null || row.id == null) continue;
       const id = String(row.id);
       seen.add(id);
-      const outcome = await applyChange({
+      const outcome = await _applyChange({
         table,
         op: "upsert",
         id,
@@ -246,8 +283,13 @@ export function makeSyncClient({ store, queue, core }) {
         row,
         at_ms: 0,
       });
-      if (outcome === "applied" || outcome === "echo-adopted") res.applied += 1;
-      else if (outcome === "conflict-resolved") res.conflicts += 1;
+      if (
+        outcome === "applied" ||
+        outcome === "echo-adopted" ||
+        outcome === "refreshed"
+      ) {
+        res.applied += 1;
+      } else if (outcome === "conflict-resolved") res.conflicts += 1;
       else res.ignored += 1;
     }
     if (prune) {
@@ -262,6 +304,10 @@ export function makeSyncClient({ store, queue, core }) {
       }
     }
     return res;
+  }
+
+  function hydrate(table, rows, options) {
+    return mutate(() => _hydrate(table, rows, options));
   }
 
   return { applyChange, optimisticWrite, optimisticDelete, flushQueue, hydrate };

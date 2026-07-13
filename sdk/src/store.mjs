@@ -65,11 +65,11 @@ function transactionDone(transaction) {
   });
 }
 
-async function withStore(db, name, mode, operation) {
-  const transaction = db.transaction(name, mode);
+async function withTransaction(db, names, mode, operation) {
+  const transaction = db.transaction(names, mode);
   const done = transactionDone(transaction);
   try {
-    const result = await operation(transaction.objectStore(name));
+    const result = await operation(transaction);
     await done;
     return result;
   } catch (error) {
@@ -81,6 +81,12 @@ async function withStore(db, name, mode, operation) {
     await done.catch(() => {});
     throw error;
   }
+}
+
+async function withStore(db, name, mode, operation) {
+  return withTransaction(db, name, mode, (transaction) =>
+    operation(transaction.objectStore(name)),
+  );
 }
 
 /**
@@ -197,6 +203,37 @@ export function makeQueue(store) {
       );
     },
     /**
+     * Atomically apply an optimistic row mutation and append its retry record.
+     * A crash or IndexedDB abort can therefore leave neither change, but never
+     * a dirty/deleted row whose only durable resend intent is missing.
+     */
+    async enqueueOptimistic(write, row) {
+      return withTransaction(
+        db,
+        [write.table, QUEUE_STORE],
+        "readwrite",
+        async (transaction) => {
+          const rows = transaction.objectStore(write.table);
+          const queued = transaction.objectStore(QUEUE_STORE);
+          const mutation =
+            write.op === "delete"
+              ? rows.delete(write.id)
+              : rows.put({
+                  id: write.id,
+                  row,
+                  version: write.base_version,
+                  dirty: true,
+                });
+          const queueRequest = queued.add({ ...write, attempts: 0 });
+          const [, seq] = await Promise.all([
+            promisify(mutation),
+            promisify(queueRequest),
+          ]);
+          return seq;
+        },
+      );
+    },
+    /**
      * All queued writes in insertion order, each carrying its `seq`. The store's
      * keyPath is "seq" with autoIncrement, so IndexedDB injects the generated key
      * into each record — no separate getAllKeys() round-trip needed.
@@ -209,6 +246,198 @@ export function makeQueue(store) {
     async remove(seq) {
       await withStore(db, QUEUE_STORE, "readwrite", (objectStore) =>
         promisify(objectStore.delete(seq)),
+      );
+    },
+    /**
+     * Atomically retire an HTTP-acknowledged write and update the row metadata.
+     *
+     * Returning `Missing` is significant: an exact realtime echo or a
+     * server-wins conflict already retired this sequence. A version-only HTTP
+     * ack must not then advance whichever authoritative payload replaced it.
+     */
+    async settleAck(table, id, seq, committedVersion) {
+      return withTransaction(
+        db,
+        [table, QUEUE_STORE],
+        "readwrite",
+        async (transaction) => {
+          const rows = transaction.objectStore(table);
+          const queued = transaction.objectStore(QUEUE_STORE);
+          const [write, rec, writes] = await Promise.all([
+            promisify(queued.get(seq)),
+            promisify(rows.get(id)),
+            promisify(queued.getAll()),
+          ]);
+          if (!write) return "Missing";
+          if (write.table !== table || write.id !== id) {
+            throw new Error("queued write identity changed before acknowledgement");
+          }
+
+          const hasOtherPendingWrite = writes.some(
+            (candidate) =>
+              candidate.seq !== seq &&
+              candidate.table === table &&
+              candidate.id === id,
+          );
+          let outcome = "Superseded";
+          const requests = [];
+          for (const candidate of writes) {
+            if (
+              candidate.seq < seq &&
+              candidate.table === table &&
+              candidate.id === id
+            ) {
+              candidate.superseded_version = Math.max(
+                candidate.superseded_version ?? Number.MIN_SAFE_INTEGER,
+                committedVersion,
+              );
+              requests.push(promisify(queued.put(candidate)));
+            }
+          }
+          if (rec) {
+            if (rec.version <= committedVersion) {
+              rec.version = committedVersion;
+              outcome = { Adopt: committedVersion };
+            }
+            rec.dirty = hasOtherPendingWrite;
+            requests.push(promisify(rows.put(rec)));
+          }
+          requests.push(promisify(queued.delete(seq)));
+          await Promise.all(requests);
+          return outcome;
+        },
+      );
+    },
+    /**
+     * Atomically adopt an exact-key realtime echo and retire its queue entry.
+     * The committed server payload wins when this was the last local write;
+     * otherwise the newer optimistic value is preserved and remains dirty.
+     */
+    async adoptEcho(event, seq) {
+      return withTransaction(
+        db,
+        [event.table, QUEUE_STORE],
+        "readwrite",
+        async (transaction) => {
+          const rows = transaction.objectStore(event.table);
+          const queued = transaction.objectStore(QUEUE_STORE);
+          const [echo, rec, writes] = await Promise.all([
+            promisify(queued.get(seq)),
+            promisify(rows.get(event.id)),
+            promisify(queued.getAll()),
+          ]);
+          if (!echo) return false;
+          if (echo.table !== event.table || echo.id !== event.id) {
+            throw new Error("queued echo identity changed before reconciliation");
+          }
+
+          const remainingRowWrites = writes.filter(
+            (candidate) =>
+              candidate.seq !== seq &&
+              candidate.table === event.table &&
+              candidate.id === event.id,
+          );
+          const hasNewerLocalWrite = remainingRowWrites.some(
+            (candidate) => candidate.seq > seq,
+          );
+          const echoWasSuperseded =
+            Number.isSafeInteger(echo.superseded_version) &&
+            echo.superseded_version >= event.version;
+          // Construct the possibly-uncloneable server row request before
+          // issuing queue mutations. The transaction is atomic either way, but
+          // this ordering also avoids orphaned rejected queue promises when an
+          // IndexedDB implementation throws DataCloneError synchronously.
+          let rowRequest;
+          if (echoWasSuperseded) {
+            if (rec) {
+              rec.dirty = remainingRowWrites.length > 0;
+              rowRequest = rows.put(rec);
+            }
+          } else if (!hasNewerLocalWrite) {
+            if (!rec || event.version >= rec.version) {
+              rowRequest =
+                event.op === "delete"
+                  ? rows.delete(event.id)
+                  : rows.put({
+                      id: event.id,
+                      row: event.row,
+                      version: event.version,
+                      dirty: remainingRowWrites.length > 0,
+                    });
+            } else {
+              rec.dirty = remainingRowWrites.length > 0;
+              rowRequest = rows.put(rec);
+            }
+          } else if (rec) {
+            rec.version = Math.max(rec.version, event.version);
+            rec.dirty = true;
+            rowRequest = rows.put(rec);
+          }
+
+          const requests = rowRequest ? [promisify(rowRequest)] : [];
+          for (const candidate of remainingRowWrites) {
+            if (candidate.seq < seq) {
+              candidate.superseded_version = Math.max(
+                candidate.superseded_version ?? Number.MIN_SAFE_INTEGER,
+                event.version,
+              );
+              requests.push(promisify(queued.put(candidate)));
+            }
+          }
+          requests.push(promisify(queued.delete(seq)));
+          await Promise.all(requests);
+          return true;
+        },
+      );
+    },
+    /**
+     * Atomically adopt authoritative server state and discard stale writes for
+     * the row. This closes the crash window where a server-wins conflict had
+     * landed locally but an old queued write could still be retried after reload.
+     */
+    async resolveConflict(event, seqs) {
+      await withTransaction(
+        db,
+        [event.table, QUEUE_STORE],
+        "readwrite",
+        async (transaction) => {
+          const queued = transaction.objectStore(QUEUE_STORE);
+          const rows = transaction.objectStore(event.table);
+          const [rec, writes] = await Promise.all([
+            promisify(rows.get(event.id)),
+            promisify(queued.getAll()),
+          ]);
+          const stale = new Set(seqs);
+          const hasNewerLocalWrite = writes.some(
+            (write) =>
+              !stale.has(write.seq) &&
+              write.table === event.table &&
+              write.id === event.id,
+          );
+          // Construct the possibly-uncloneable server row request before issuing
+          // queue deletions. Either side still commits/aborts as one transaction,
+          // and a synchronous DataCloneError cannot strand rejected promises.
+          let rowRequest;
+          if (!hasNewerLocalWrite) {
+            rowRequest =
+              event.op === "delete"
+                ? rows.delete(event.id)
+                : rows.put({
+                    id: event.id,
+                    row: event.row,
+                    version: event.version,
+                    dirty: false,
+                  });
+          } else if (rec) {
+            rec.version = Math.max(rec.version, event.version);
+            rec.dirty = true;
+            rowRequest = rows.put(rec);
+          }
+          const requests = [];
+          if (rowRequest) requests.push(promisify(rowRequest));
+          requests.push(...seqs.map((seq) => promisify(queued.delete(seq))));
+          await Promise.all(requests);
+        },
       );
     },
     /** Increment and return the retry count for a queued write. */

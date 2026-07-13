@@ -35,6 +35,7 @@ async function loadAdminCore() {
  * @param {object}   [opts.htmx]   the htmx instance — if given, registers the
  *                                  `fiducia-optimistic` extension bound to this client
  * @param {()=>(string|Promise<string|null>)} [opts.getToken] bearer for HTTP writes
+ * @param {string} [opts.csrfToken] same-origin CSRF token for cookie-authenticated writes
  * @param {"cookie"|"query-token"} [opts.streamAuth] stream auth; cookie recommended
  * @param {(table:string)=>Promise<object[]>} [opts.hydrateFetch]  catch-up snapshot
  * @param {(status:string)=>void} [opts.onStatus]
@@ -50,6 +51,7 @@ export async function initAdminSync(opts = {}) {
       wsPath: "/admin/ws", // admin's WS path (customer default is /app/ws)
       pathPrefix: "/api/admin/sync",
       getToken: opts.getToken,
+      csrfToken: opts.csrfToken,
       streamAuth: opts.streamAuth,
     },
     // Admin has no Supabase realtime consumer — backend WS only.
