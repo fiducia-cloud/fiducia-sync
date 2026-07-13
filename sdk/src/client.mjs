@@ -12,6 +12,16 @@
  * @param {object} deps.queue  from makeQueue(store)
  * @param {object} deps.core   from wrapCore(wasm) — { reconcile, onAck, isOwnEcho }
  */
+// A per-write idempotency identity, minted once when the write is enqueued and
+// persisted with it. Retries of the SAME queued write (flushQueue, reload) reuse
+// it, while DISTINCT writes always differ — unlike a key derived from
+// (table,id,op,base_version), which collides when two edits to the same row are
+// made before the first is acked (the second POST would be deduplicated away and
+// silently lost, while the client believes it committed).
+const mintWriteKey = () =>
+  globalThis.crypto?.randomUUID?.() ??
+  `w-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+
 export function makeSyncClient({ store, queue, core }) {
   async function applyServer(event) {
     if (event.op === "delete") {
