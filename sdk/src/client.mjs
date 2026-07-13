@@ -127,10 +127,14 @@ export function makeSyncClient({ store, queue, core }) {
       await store.put(table, id, row, { version: base_version, dirty: true });
     }
     const payload = op === "delete" ? null : row;
-    const seq = await queue.enqueue({ id, table, op, payload, base_version });
+    // `key` rides along durably so every retry of this write (here or from
+    // flushQueue after a reload) presents the same Idempotency-Key, while a
+    // subsequent distinct write to the same row never shares it.
+    const write = { id, table, op, payload, base_version, key: mintWriteKey() };
+    const seq = await queue.enqueue(write);
 
     try {
-      const ack = await send({ id, table, op, payload, base_version });
+      const ack = await send(write);
       const outcome = await _applyAck(table, id, ack);
       await queue.remove(seq);
       return {
