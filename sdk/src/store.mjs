@@ -18,67 +18,161 @@ export function promisify(request) {
 
 const QUEUE_STORE = "_queue";
 
+function ensureStores(db, tables) {
+  for (const table of [...new Set([...tables, QUEUE_STORE])]) {
+    if (!db.objectStoreNames.contains(table)) {
+      db.createObjectStore(
+        table,
+        table === QUEUE_STORE
+          ? { keyPath: "seq", autoIncrement: true }
+          : { keyPath: "id" },
+      );
+    }
+  }
+}
+
+function openDatabase(dbName, version, tables) {
+  return new Promise((resolve, reject) => {
+    const request =
+      version === undefined
+        ? indexedDB.open(dbName)
+        : indexedDB.open(dbName, version);
+    let blocked = false;
+    request.onupgradeneeded = () => ensureStores(request.result, tables);
+    request.onblocked = () => {
+      blocked = true;
+      reject(
+        new Error(
+          `IndexedDB upgrade for ${dbName} is blocked by another open page`,
+        ),
+      );
+    };
+    request.onsuccess = () => {
+      if (blocked) request.result.close();
+      else resolve(request.result);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function transactionDone(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("IndexedDB transaction failed"));
+  });
+}
+
+async function withStore(db, name, mode, operation) {
+  const transaction = db.transaction(name, mode);
+  const done = transactionDone(transaction);
+  try {
+    const result = await operation(transaction.objectStore(name));
+    await done;
+    return result;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {
+      // The request may already have aborted or completed the transaction.
+    }
+    await done.catch(() => {});
+    throw error;
+  }
+}
+
 /**
  * Open (or create) the per-plane store.
  * @param {string} dbName  e.g. "fiducia-customer" / "fiducia-admin"
  * @param {string[]} tables synced table names (one object store each)
  */
 export async function openStore(dbName, tables) {
-  const db = await new Promise((resolve, reject) => {
-    const request = indexedDB.open(dbName, 1);
-    request.onupgradeneeded = () => {
-      const d = request.result;
-      for (const table of tables) {
-        if (!d.objectStoreNames.contains(table)) {
-          d.createObjectStore(table, { keyPath: "id" });
-        }
-      }
-      if (!d.objectStoreNames.contains(QUEUE_STORE)) {
-        d.createObjectStore(QUEUE_STORE, { keyPath: "seq", autoIncrement: true });
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  const requiredStores = [...new Set([...tables, QUEUE_STORE])];
+  let db = await openDatabase(dbName, undefined, tables);
 
-  const objStore = (name, mode) => db.transaction(name, mode).objectStore(name);
+  // IndexedDB only exposes schema changes during a version upgrade. Opening an
+  // existing v1 database with a newly configured table does not fire
+  // `onupgradeneeded`, so detect missing stores and advance from the live
+  // version. Retry when another tab won the same upgrade race first.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const missing = requiredStores.filter(
+      (name) => !db.objectStoreNames.contains(name),
+    );
+    if (missing.length === 0) break;
+
+    const nextVersion = db.version + 1;
+    db.close();
+    try {
+      db = await openDatabase(dbName, nextVersion, tables);
+    } catch (error) {
+      if (error?.name !== "VersionError") throw error;
+      db = await openDatabase(dbName, undefined, tables);
+    }
+  }
+
+  const stillMissing = requiredStores.filter(
+    (name) => !db.objectStoreNames.contains(name),
+  );
+  if (stillMissing.length > 0) {
+    db.close();
+    throw new Error(
+      `IndexedDB schema for ${dbName} is missing stores: ${stillMissing.join(", ")}`,
+    );
+  }
+
+  // Cooperate with a later tab that needs to add another table instead of
+  // indefinitely blocking its version upgrade.
+  db.onversionchange = () => db.close();
 
   return {
     /** The stored row (or null). */
     async get(table, id) {
-      const rec = await promisify(objStore(table, "readonly").get(id));
+      const rec = await withStore(db, table, "readonly", (objectStore) =>
+        promisify(objectStore.get(id)),
+      );
       return rec ? rec.row : null;
     },
 
     /** Sync metadata { version, dirty } for a row (or null if absent). */
     async meta(table, id) {
-      const rec = await promisify(objStore(table, "readonly").get(id));
+      const rec = await withStore(db, table, "readonly", (objectStore) =>
+        promisify(objectStore.get(id)),
+      );
       return rec ? { version: rec.version, dirty: Boolean(rec.dirty) } : null;
     },
 
     /** Upsert a row with its version; `dirty` marks an un-acked optimistic write. */
     async put(table, id, row, { version, dirty = false }) {
-      await promisify(objStore(table, "readwrite").put({ id, row, version, dirty }));
+      await withStore(db, table, "readwrite", (objectStore) =>
+        promisify(objectStore.put({ id, row, version, dirty })),
+      );
     },
 
     /** Mark an existing row clean/dirty and (optionally) adopt a new version. */
     async setMeta(table, id, { version, dirty }) {
-      const store = objStore(table, "readwrite");
-      const rec = await promisify(store.get(id));
-      if (!rec) return false;
-      if (version !== undefined) rec.version = version;
-      if (dirty !== undefined) rec.dirty = dirty;
-      await promisify(store.put(rec));
-      return true;
+      return withStore(db, table, "readwrite", async (objectStore) => {
+        const rec = await promisify(objectStore.get(id));
+        if (!rec) return false;
+        if (version !== undefined) rec.version = version;
+        if (dirty !== undefined) rec.dirty = dirty;
+        await promisify(objectStore.put(rec));
+        return true;
+      });
     },
 
     async del(table, id) {
-      await promisify(objStore(table, "readwrite").delete(id));
+      await withStore(db, table, "readwrite", (objectStore) =>
+        promisify(objectStore.delete(id)),
+      );
     },
 
     /** All rows for a table (unwrapped). */
     async all(table) {
-      const recs = await promisify(objStore(table, "readonly").getAll());
+      const recs = await withStore(db, table, "readonly", (objectStore) =>
+        promisify(objectStore.getAll()),
+      );
       return recs.map((r) => r.row);
     },
 
@@ -95,11 +189,12 @@ export async function openStore(dbName, tables) {
  */
 export function makeQueue(store) {
   const db = store._db;
-  const q = (mode) => db.transaction(QUEUE_STORE, mode).objectStore(QUEUE_STORE);
   return {
     /** Append a write; returns its assigned seq. */
     async enqueue(write) {
-      return promisify(q("readwrite").add({ ...write, attempts: 0 }));
+      return withStore(db, QUEUE_STORE, "readwrite", (objectStore) =>
+        promisify(objectStore.add({ ...write, attempts: 0 })),
+      );
     },
     /**
      * All queued writes in insertion order, each carrying its `seq`. The store's
@@ -107,19 +202,24 @@ export function makeQueue(store) {
      * into each record — no separate getAllKeys() round-trip needed.
      */
     async list() {
-      return promisify(q("readonly").getAll());
+      return withStore(db, QUEUE_STORE, "readonly", (objectStore) =>
+        promisify(objectStore.getAll()),
+      );
     },
     async remove(seq) {
-      await promisify(q("readwrite").delete(seq));
+      await withStore(db, QUEUE_STORE, "readwrite", (objectStore) =>
+        promisify(objectStore.delete(seq)),
+      );
     },
     /** Increment and return the retry count for a queued write. */
     async bumpAttempts(seq) {
-      const store2 = q("readwrite");
-      const rec = await promisify(store2.get(seq));
-      if (!rec) return 0;
-      rec.attempts = (rec.attempts ?? 0) + 1;
-      await promisify(store2.put(rec));
-      return rec.attempts;
+      return withStore(db, QUEUE_STORE, "readwrite", async (objectStore) => {
+        const rec = await promisify(objectStore.get(seq));
+        if (!rec) return 0;
+        rec.attempts = (rec.attempts ?? 0) + 1;
+        await promisify(objectStore.put(rec));
+        return rec.attempts;
+      });
     },
   };
 }

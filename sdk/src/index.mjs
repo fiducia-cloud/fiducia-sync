@@ -14,7 +14,7 @@
 //   // ...or wire BOTH transports into one client in a single call:
 //   const sync = await startSync({
 //     dbName: "fiducia-customer", tables: ["api_keys"],
-//     backend: { baseUrl: location.origin, getToken },
+//     backend: { baseUrl: location.origin, getToken, streamAuth: "cookie" },
 //     supabase: { client: supabaseClient, filter: `org_id=eq.${orgId}` },
 //     hydrateFetch: (table) => fetch(`/api/customer/${table}`).then((r) => r.json()),
 //   });

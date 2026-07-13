@@ -68,3 +68,38 @@ test("write-queue enqueues durably, lists in order, bumps attempts, removes", as
   assert.equal(items.length, 1);
   assert.equal(items[0].id, "k2");
 });
+
+test("openStore upgrades an existing database without losing rows or queued writes", async (t) => {
+  dbCounter += 1;
+  const dbName = `fiducia-upgrade-test-${dbCounter}`;
+  const first = await openStore(dbName, ["api_keys"]);
+  const firstQueue = makeQueue(first);
+  await first.put("api_keys", "k1", { name: "preserved" }, { version: 4 });
+  await firstQueue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    base_version: 4,
+  });
+
+  // Keep `first` open: its versionchange handler must cooperate with the
+  // upgrade instead of leaving the new table blocked forever.
+  const upgraded = await openStore(dbName, ["api_keys", "customer_preferences"]);
+  t.after(() => {
+    first.close();
+    upgraded.close();
+  });
+
+  assert.ok(upgraded._db.version > 1);
+  assert.deepEqual(await upgraded.get("api_keys", "k1"), { name: "preserved" });
+  assert.equal((await makeQueue(upgraded).list()).length, 1);
+  await upgraded.put(
+    "customer_preferences",
+    "p1",
+    { theme: "dark" },
+    { version: 1 },
+  );
+  assert.deepEqual(await upgraded.get("customer_preferences", "p1"), {
+    theme: "dark",
+  });
+});

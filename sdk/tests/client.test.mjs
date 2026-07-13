@@ -58,8 +58,9 @@ test("optimisticWrite stays queued + dirty when the send fails (offline)", async
 
   const res = await client.optimisticWrite("api_keys", "k1", { name: "b" }, send);
   assert.equal(res.status, "queued");
+  assert.equal(res.attempts, 1);
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 2, dirty: true }); // awaiting retry
-  assert.equal((await queue.list()).length, 1);
+  assert.equal((await queue.list())[0].attempts, 1);
 });
 
 test("the echo of our own write is adopted, not flagged as a conflict", async (t) => {
@@ -71,10 +72,62 @@ test("the echo of our own write is adopted, not flagged as a conflict", async (t
   await queue.enqueue({ id: "k1", table: "api_keys", op: "upsert", payload: { name: "b" }, base_version: 2 });
 
   // The realtime echo of our own commit arrives at version 3 (= base + 1).
-  const r = await client.applyChange(change({ version: 3, row: { name: "b" } }));
+  const r = await client.applyChange(
+    change({ version: 3, row: { name: "server-normalized" } }),
+  );
   assert.equal(r, "echo-adopted");
+  // The optimistic value was already applied locally; the transport echo only
+  // adopts metadata and must not write the payload through IndexedDB again.
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "b" });
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
   assert.equal((await queue.list()).length, 0);
+});
+
+test("the echo of an optimistic delete dequeues even though the row is already absent", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "delete",
+    payload: null,
+    base_version: 2,
+  });
+  const result = await client.applyChange(
+    change({ op: "delete", version: 3, row: null }),
+  );
+  assert.equal(result, "echo-adopted");
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("flushQueue persists failures and rejects with actionable details", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "mine" }, { version: 2, dirty: true });
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: { name: "mine" },
+    base_version: 2,
+  });
+
+  await assert.rejects(
+    () =>
+      client.flushQueue(async () => {
+        throw new Error("offline");
+      }),
+    (error) => {
+      assert.equal(error.name, "QueueFlushError");
+      assert.equal(error.flushed, 0);
+      assert.equal(error.failures.length, 1);
+      assert.match(String(error.failures[0].error), /offline/);
+      return true;
+    },
+  );
+  assert.equal((await queue.list())[0].attempts, 1);
 });
 
 test("a genuine conflict (someone else's newer change) resolves server-wins and drops the stale queued write", async (t) => {

@@ -140,12 +140,18 @@ impl QueuedWrite {
     /// The row version the server will assign when it commits this write — used
     /// to recognize the change-event echo of our own write (not a conflict).
     pub fn expected_version(&self) -> i64 {
-        self.base_version + 1
+        self.base_version.saturating_add(1)
     }
 
     /// True if `incoming` is the realtime echo of this queued write.
     pub fn is_echo_of(&self, incoming: &ChangeEvent) -> bool {
-        incoming.id == self.id && incoming.version == self.expected_version()
+        incoming.table == self.table
+            && incoming.id == self.id
+            && incoming.op == self.op
+            && self
+                .base_version
+                .checked_add(1)
+                .is_some_and(|expected| incoming.version == expected)
     }
 }
 
@@ -262,6 +268,18 @@ mod tests {
         assert_eq!(queued.expected_version(), 6);
         assert!(queued.is_echo_of(&ev(ChangeOp::Upsert, 6))); // our own commit echoing back
         assert!(!queued.is_echo_of(&ev(ChangeOp::Upsert, 7))); // someone else's later change
+        assert!(!queued.is_echo_of(&ChangeEvent {
+            table: "customer_preferences".into(),
+            ..ev(ChangeOp::Upsert, 6)
+        }));
+        assert!(!queued.is_echo_of(&ev(ChangeOp::Delete, 6)));
+
+        let overflow = QueuedWrite {
+            base_version: i64::MAX,
+            ..queued
+        };
+        assert_eq!(overflow.expected_version(), i64::MAX);
+        assert!(!overflow.is_echo_of(&ev(ChangeOp::Upsert, i64::MAX)));
     }
 
     #[test]

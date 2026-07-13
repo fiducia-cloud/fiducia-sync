@@ -10,6 +10,8 @@ duplicate/out-of-order delivery across them is harmless.
   returning `null` so the change isn't silently dropped as stale.
 - `backend.mjs` — the Rust backend's own WebSocket (with SSE fallback and capped
   auto-reconnect) for reads, plus the HTTP write path with a stable
-  `Idempotency-Key` and optional bearer auth. Plane-agnostic paths.
+  `Idempotency-Key` and optional bearer auth. HTTP tokens use `Authorization`;
+  streams default to cookie auth and require explicit opt-in before a token can
+  appear in a URL. Plane-agnostic paths.
 - `supabase.mjs` — Supabase realtime `postgres_changes` → `ChangeEvent`, over a
   caller-provided supabase-js client (with an RLS-complementing tenant filter).

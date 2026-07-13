@@ -65,8 +65,9 @@ test("connectBackend reconnects with backoff after a close", () => {
 test("connectBackend falls back to SSE when no WebSocket is available", () => {
   const created = [];
   class MockES {
-    constructor(url) {
+    constructor(url, options) {
       this.url = url;
+      this.options = options;
       this.listeners = {};
       created.push(this);
     }
@@ -85,10 +86,88 @@ test("connectBackend falls back to SSE when no WebSocket is available", () => {
   });
   assert.equal(created.length, 1);
   assert.match(created[0].url, /\/app\/events$/);
+  assert.equal(created[0].options.withCredentials, true);
+  assert.doesNotMatch(created[0].url, /access_token/);
   for (const fn of created[0].listeners["fiducia-sync"]) {
     fn({ data: syncFrame([{ table: "api_keys", op: "delete", id: "k9", version: 3 }]) });
   }
   assert.equal(seen[0].id, "k9");
+});
+
+test("connectBackend reports when no browser stream transport exists", () => {
+  const statuses = [];
+  connectBackend({
+    baseUrl: "http://localhost",
+    onChanges: () => {},
+    onStatus: (status, error) => statuses.push({ status, error }),
+    WebSocketImpl: null,
+    EventSourceImpl: null,
+  });
+  assert.equal(statuses[0].status, "transport-error");
+  assert.match(statuses[0].error.message, /neither WebSocket nor EventSource/);
+  assert.equal(statuses[1].status, "closed");
+});
+
+test("stream bearer tokens fail closed unless URL exposure is explicitly opted in", async () => {
+  MockWS.instances = [];
+  assert.throws(
+    () =>
+      connectBackend({
+        baseUrl: "https://host",
+        getToken: () => "secret",
+        onChanges: () => {},
+        WebSocketImpl: MockWS,
+      }),
+    /choose streamAuth/,
+  );
+  assert.equal(MockWS.instances.length, 0);
+
+  connectBackend({
+    baseUrl: "https://host",
+    getToken: () => "secret value",
+    streamAuth: "query-token",
+    onChanges: () => {},
+    WebSocketImpl: MockWS,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(MockWS.instances.length, 1);
+  const url = new URL(MockWS.instances[0].url);
+  assert.equal(url.searchParams.get("access_token"), "secret value");
+});
+
+test("cookie stream auth never calls or exposes the HTTP bearer provider", () => {
+  MockWS.instances = [];
+  let tokenCalls = 0;
+  connectBackend({
+    baseUrl: "https://host",
+    getToken: () => {
+      tokenCalls += 1;
+      return "secret";
+    },
+    streamAuth: "cookie",
+    onChanges: () => {},
+    WebSocketImpl: MockWS,
+  });
+  assert.equal(tokenCalls, 0);
+  assert.equal(MockWS.instances.length, 1);
+  assert.doesNotMatch(MockWS.instances[0].url, /secret|access_token/);
+});
+
+test("query-token mode reports auth failure and opens no unauthenticated socket", async () => {
+  MockWS.instances = [];
+  const statuses = [];
+  connectBackend({
+    baseUrl: "https://host",
+    getToken: async () => null,
+    streamAuth: "query-token",
+    onChanges: () => {},
+    onStatus: (status, error) => statuses.push({ status, error }),
+    WebSocketImpl: MockWS,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(MockWS.instances.length, 0);
+  assert.equal(statuses[0].status, "auth-error");
+  assert.match(statuses[0].error.message, /no token/);
 });
 
 test("backendSend targets the plane path, sets a stable Idempotency-Key + bearer auth", async () => {
@@ -123,4 +202,14 @@ test("backendSend throws on a non-2xx response; makeBackendSend binds config", a
   const send = makeBackendSend("http://x", { pathPrefix: "/api/customer/sync", fetchImpl: fetchOk });
   await send({ id: "a", table: "api_keys", op: "upsert", base_version: 0 });
   assert.equal(seenUrl, "http://x/api/customer/sync/api_keys");
+
+  await assert.rejects(
+    () =>
+      backendSend(
+        "http://x",
+        { id: "a", table: "api_keys", op: "upsert", base_version: 0 },
+        { getToken: async () => null, fetchImpl: fetchOk },
+      ),
+    /token provider returned no token/,
+  );
 });

@@ -24,7 +24,7 @@ browser IO:
 │     └── wasm-bindgen  → pkg/       # wasm + JS glue
 └── sdk/src/ (JS shim)
     ├── store.mjs       # IndexedDB persistence + the durable write-queue (per-plane DB,
-    │                   #   one object store per table, `_queue` store survives reload)
+    │                   #   safe version upgrades add tables without losing rows/queue)
     ├── client.mjs      # applyChange / optimisticWrite / optimisticDelete / flushQueue / hydrate
     ├── start.mjs       # startSync() — wire BOTH transports into one client (see below)
     ├── core.mjs        # wraps the wasm ABI (JSON in/out) as object-in/out JS
@@ -67,7 +67,11 @@ realtime and the backend WS, and re-hydrates (catch-up) on every (re)connect:
 const sync = await startSync({
   dbName: "fiducia-customer",
   tables: ["api_keys"],
-  backend:  { baseUrl: location.origin, getToken },           // WS reads + idempotent writes
+  backend:  {
+    baseUrl: location.origin,
+    getToken,                    // Authorization header for HTTP writes
+    streamAuth: "cookie",        // recommended: HttpOnly cookie for WS/SSE
+  },
   supabase: { client: supabaseClient, filter: `org_id=eq.${orgId}` }, // realtime, tenant-scoped
   hydrateFetch: (t) => fetch(`/api/customer/${t}`).then((r) => r.json()),
 });
@@ -75,8 +79,14 @@ const sync = await startSync({
 ```
 
 Writes carry a stable `Idempotency-Key` (`table:id:op:base_version`) so retried /
-queued POSTs never double-apply, and an optional bearer token (Authorization on
-fetch; `?access_token=` on WS/SSE, which can't set headers).
+queued POSTs never double-apply, and an optional bearer token in the HTTP
+`Authorization` header. Browser WebSocket/EventSource APIs cannot attach that
+header, so streams use ambient cookie authentication by default. Passing
+`getToken` requires an explicit `streamAuth`: choose `"cookie"` (recommended,
+the token provider remains HTTP-only), or compatibility-only `"query-token"`
+when the server cannot use a cookie. Query-token mode is deliberately opt-in
+because URLs are exposed to proxies, access logs, and diagnostics; a missing or
+failing token provider opens no unauthenticated stream.
 
 ## Reconcile rules (implemented + tested in `src/lib.rs`)
 
@@ -88,8 +98,25 @@ fetch; `?access_token=` on WS/SSE, which can't set headers).
 | clean, older than incoming | any | **Apply** |
 | **dirty**, older than incoming | any | **Conflict** → `resolve_conflict` (default: server wins) |
 
-Echoes of our own in-flight write (`incoming.version == queued.base_version + 1`)
-are matched via `QueuedWrite::is_echo_of` and adopted, never treated as conflicts.
+Echoes of our own in-flight write (same table/id/op and
+`incoming.version == queued.base_version + 1`) are matched via
+`QueuedWrite::is_echo_of`. The SDK adopts only the committed version and removes
+the durable queue entry; it does not write the already-applied optimistic
+payload through IndexedDB again. Optimistic delete echoes are recognized even
+though the local row is already absent.
+
+IndexedDB writes wait for the transaction's `complete` event, not merely the
+individual request's success event. When a later SDK configuration adds a
+synced table, `openStore` advances the live database version, preserves existing
+rows and `_queue`, and cooperates with upgrades from other tabs via
+`versionchange`. A blocked or incomplete migration fails visibly.
+
+`flushQueue` removes an item only after the acknowledgement metadata is durable.
+Failures first persist their retry counter and then reject with a
+`QueueFlushError` containing the failed writes and successful count;
+`startSync` forwards that error as `onStatus("flush-error", error)` rather than
+discarding it. If no status callback is configured, background transport,
+apply, hydrate, and flush errors are reported to `console.error`.
 
 ## Isolation
 
@@ -110,8 +137,13 @@ See `docs/repo-boundaries.md`.
   `serde_json::from_str(...).map_err(err)?`, so malformed input returns a
   `JsError` to the caller rather than panicking. Reconcile decisions are total
   over any `i64` `version`, so a hostile or stale change cannot wedge the engine.
-- **No secrets, no logging.** The crate holds no credentials and emits no logs;
-  tokens (bearer / `access_token`) live only in the JS shim's transport layer.
+- **Stream credentials do not enter URLs by default.** HTTP bearer tokens stay
+  in `Authorization`; WS/SSE uses an HttpOnly session cookie. The legacy
+  `?access_token=` form is available only through explicit
+  `streamAuth: "query-token"` opt-in and fails closed when no token is returned.
+- **Durable, observable retries.** IndexedDB mutations await transaction commit;
+  queue failures persist attempt counts and surface through `QueueFlushError`
+  and `startSync` status callbacks.
 - **No env-var config surface.** This crate exposes no environment-variable or
   CLI configuration — it is a library linked into the wasm bundle and the Rust
   backends — so there is nothing here for the `flags-2-env` launcher to wrap.
@@ -120,9 +152,9 @@ See `docs/repo-boundaries.md`.
 
 - ✅ `fiducia-sync-core` — reconcile + write-queue ack rules, `cargo test` 7/7.
 - ✅ wasm-bindgen bindings (`src/wasm.rs`) — `wasm-pack build` produces `pkg/`.
-- ✅ JS shim — IndexedDB store + durable queue, both transports, hx-optimistic
+- ✅ JS shim — migration-safe IndexedDB store + durable queue, both transports, hx-optimistic
   extension, `startSync`, catch-up hydration, idempotent/authed writes,
-  WS auto-reconnect. `node --test` 20/20.
+  WS auto-reconnect. `node --test` 27/27.
 
 ## Develop
 

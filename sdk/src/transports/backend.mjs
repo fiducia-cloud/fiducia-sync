@@ -6,8 +6,9 @@
 //   - configurable plane paths (customer uses /app/ws + /api/customer/sync,
 //     admin uses /admin/ws + /api/admin/sync) — nothing customer-specific is
 //     baked in anymore;
-//   - optional bearer auth (WS/SSE via ?access_token= since browsers can't set
-//     socket headers; fetch via Authorization header);
+//   - bearer auth uses Authorization on fetch. Browser WS/EventSource cannot set
+//     that header, so streams default to cookie auth and URL tokens require the
+//     explicit, compatibility-only `streamAuth: "query-token"` opt-in;
 //   - a stable Idempotency-Key on every write so retried/queued POSTs never
 //     double-apply (matches the fiducia-clients idempotency contract);
 //   - WebSocket auto-reconnect with capped exponential backoff, SSE only as a
@@ -19,7 +20,7 @@ import { decodeBackendMessage } from "./decode.mjs";
 
 const trimSlash = (s) => String(s).replace(/\/+$/, "");
 
-/** Append `?access_token=<token>` to a URL (WS/SSE can't carry auth headers). */
+/** Append the explicitly opted-in compatibility token to a stream URL. */
 function withToken(url, token) {
   if (!token) return url;
   const u = new URL(url);
@@ -38,7 +39,8 @@ function withToken(url, token) {
  * @param {string} [o.ssePath="/app/events"] plane SSE path
  * @param {(changes:object[])=>void} o.onChanges
  * @param {()=>(string|Promise<string|null>)} [o.getToken] bearer token provider
- * @param {(status:"open"|"reconnecting"|"sse"|"closed")=>void} [o.onStatus]
+ * @param {"cookie"|"query-token"} [o.streamAuth] stream authentication mode
+ * @param {(status:"open"|"reconnecting"|"sse"|"closed"|"auth-error"|"transport-error", err?:Error)=>void} [o.onStatus]
  * @param {boolean} [o.reconnect=true]
  * @param {number}  [o.baseBackoffMs=500]
  * @param {number}  [o.maxBackoffMs=30000]
@@ -51,6 +53,7 @@ export function connectBackend({
   ssePath = "/app/events",
   onChanges,
   getToken,
+  streamAuth,
   onStatus,
   reconnect = true,
   baseBackoffMs = 500,
@@ -60,6 +63,19 @@ export function connectBackend({
   setTimeoutImpl = setTimeout,
   clearTimeoutImpl = clearTimeout,
 }) {
+  const authMode = streamAuth ?? (getToken ? null : "cookie");
+  if (authMode === null) {
+    throw new Error(
+      "getToken cannot be placed in a browser WS/SSE header; choose streamAuth \"cookie\" (recommended) or explicitly opt in to \"query-token\"",
+    );
+  }
+  if (authMode !== "cookie" && authMode !== "query-token") {
+    throw new Error(`unsupported backend streamAuth mode: ${authMode}`);
+  }
+  if (authMode === "query-token" && !getToken) {
+    throw new Error('streamAuth "query-token" requires getToken');
+  }
+
   // `undefined` (key absent) => use the platform global; an explicit null/false
   // => this transport is disabled (used to force the SSE fallback, and in tests).
   const WS =
@@ -77,34 +93,94 @@ export function connectBackend({
   let attempts = 0;
   let stopped = false;
 
-  const status = (s) => onStatus?.(s);
+  const status = (s, error) => {
+    if (onStatus) onStatus(s, error);
+    else if (error) {
+      console.error(
+        `[fiducia-sync] backend:${s}: ${error.message ?? String(error)}`,
+      );
+    }
+  };
   const deliver = (data) => {
     const changes = decodeBackendMessage(data);
     if (changes.length) onChanges(changes);
   };
 
-  async function tokenOrNull() {
+  async function tokenForUrl() {
     try {
-      return getToken ? (await getToken()) ?? null : null;
-    } catch {
+      const token = await getToken();
+      if (typeof token !== "string" || token.trim() === "") {
+        throw new Error("stream token provider returned no token");
+      }
+      return token;
+    } catch (error) {
+      status(
+        "auth-error",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       return null;
     }
   }
 
-  // Resolve the token only when a provider is configured; otherwise stay fully
-  // synchronous (construct the socket now) so callers/tests see it immediately.
-  const withMaybeToken = (fn) => {
-    if (getToken) Promise.resolve(tokenOrNull()).then((t) => fn(t));
-    else fn(null);
+  // Cookie-authenticated streams stay synchronous. The compatibility query
+  // mode resolves a token first and fails closed if it cannot obtain one.
+  const withStreamAuth = (fn) => {
+    if (authMode === "query-token") {
+      Promise.resolve(tokenForUrl())
+        .then((token) => {
+          if (token) fn(token);
+        })
+        .catch((error) => status("transport-error", error));
+    } else {
+      fn(null);
+    }
+  };
+
+  const streamUrl = (path) => {
+    const url = new URL(path, baseUrl);
+    if (url.username || url.password) {
+      throw new Error("backend stream URL must not contain credentials");
+    }
+    if (url.searchParams.has("access_token") && authMode !== "query-token") {
+      throw new Error(
+        'backend stream URL contains access_token without streamAuth "query-token"',
+      );
+    }
+    return url;
   };
 
   const startSse = () => {
-    if (source || stopped || !ES) return;
-    status("sse");
-    withMaybeToken((token) => {
+    if (source || stopped) return;
+    if (!ES) {
+      status(
+        "transport-error",
+        new Error("neither WebSocket nor EventSource is available"),
+      );
+      status("closed");
+      return;
+    }
+    withStreamAuth((token) => {
       if (source || stopped) return;
-      source = new ES(withToken(new URL(ssePath, baseUrl).toString(), token));
+      let url;
+      try {
+        url = streamUrl(ssePath).toString();
+      } catch (error) {
+        status("auth-error", error);
+        return;
+      }
+      source = new ES(withToken(url, token), {
+        withCredentials: authMode === "cookie",
+      });
+      status("sse");
       source.addEventListener("fiducia-sync", (e) => deliver(e.data));
+      source.addEventListener("error", (event) => {
+        status(
+          "transport-error",
+          event?.error instanceof Error
+            ? event.error
+            : new Error("backend SSE stream failed"),
+        );
+      });
     });
   };
 
@@ -129,17 +205,25 @@ export function connectBackend({
     }
     let wsUrl;
     try {
-      wsUrl = new URL(wsPath, baseUrl);
-      wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-    } catch {
-      startSse();
+      wsUrl = streamUrl(wsPath);
+      if (wsUrl.protocol === "https:") wsUrl.protocol = "wss:";
+      else if (wsUrl.protocol === "http:") wsUrl.protocol = "ws:";
+      else if (wsUrl.protocol !== "ws:" && wsUrl.protocol !== "wss:") {
+        throw new Error(`unsupported backend WebSocket protocol: ${wsUrl.protocol}`);
+      }
+    } catch (error) {
+      status("auth-error", error);
       return;
     }
-    withMaybeToken((token) => {
+    withStreamAuth((token) => {
       if (stopped) return;
       try {
         socket = new WS(withToken(wsUrl.toString(), token));
-      } catch {
+      } catch (error) {
+        status(
+          "transport-error",
+          error instanceof Error ? error : new Error(String(error)),
+        );
         startSse();
         return;
       }
@@ -148,7 +232,14 @@ export function connectBackend({
         status("open");
       });
       socket.addEventListener("message", (e) => deliver(e.data));
-      socket.addEventListener("error", () => {});
+      socket.addEventListener("error", (event) => {
+        status(
+          "transport-error",
+          event?.error instanceof Error
+            ? event.error
+            : new Error("backend WebSocket failed"),
+        );
+      });
       socket.addEventListener("close", () => {
         socket = null;
         scheduleReconnect();
@@ -203,7 +294,10 @@ export async function backendSend(baseUrl, write, opts = {}) {
   const headers = { "content-type": "application/json", "idempotency-key": key };
   if (getToken) {
     const token = await getToken();
-    if (token) headers["authorization"] = `Bearer ${token}`;
+    if (typeof token !== "string" || token.trim() === "") {
+      throw new Error("sync write token provider returned no token");
+    }
+    headers["authorization"] = `Bearer ${token}`;
   }
 
   const res = await fetchImpl(url, {
