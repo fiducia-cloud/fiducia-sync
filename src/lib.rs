@@ -200,7 +200,10 @@ mod tests {
 
     #[test]
     fn stale_and_duplicate_are_ignored() {
-        let local = LocalRow { version: 5, dirty: false };
+        let local = LocalRow {
+            version: 5,
+            dirty: false,
+        };
         assert_eq!(
             reconcile(Some(local), &ev(ChangeOp::Upsert, 4)),
             Reconcile::Ignore(IgnoreReason::Stale)
@@ -214,19 +217,37 @@ mod tests {
     #[test]
     fn newer_clean_applies_newer_dirty_conflicts() {
         assert_eq!(
-            reconcile(Some(LocalRow { version: 5, dirty: false }), &ev(ChangeOp::Upsert, 6)),
+            reconcile(
+                Some(LocalRow {
+                    version: 5,
+                    dirty: false
+                }),
+                &ev(ChangeOp::Upsert, 6)
+            ),
             Reconcile::Apply
         );
         assert_eq!(
-            reconcile(Some(LocalRow { version: 5, dirty: true }), &ev(ChangeOp::Upsert, 6)),
+            reconcile(
+                Some(LocalRow {
+                    version: 5,
+                    dirty: true
+                }),
+                &ev(ChangeOp::Upsert, 6)
+            ),
             Reconcile::Conflict
         );
     }
 
     #[test]
     fn conflict_policy_resolves() {
-        assert_eq!(resolve_conflict(ConflictPolicy::ServerWins), Resolution::ApplyServer);
-        assert_eq!(resolve_conflict(ConflictPolicy::ClientWins), Resolution::KeepLocal);
+        assert_eq!(
+            resolve_conflict(ConflictPolicy::ServerWins),
+            Resolution::ApplyServer
+        );
+        assert_eq!(
+            resolve_conflict(ConflictPolicy::ClientWins),
+            Resolution::KeepLocal
+        );
     }
 
     #[test]
@@ -245,10 +266,40 @@ mod tests {
 
     #[test]
     fn ack_adopts_or_is_superseded() {
-        let ack = WriteAck { id: "k1".into(), committed_version: 6 };
-        assert_eq!(on_ack(LocalRow { version: 5, dirty: true }, &ack), AckOutcome::Adopt(6));
-        assert_eq!(on_ack(LocalRow { version: 6, dirty: false }, &ack), AckOutcome::Adopt(6));
-        assert_eq!(on_ack(LocalRow { version: 7, dirty: false }, &ack), AckOutcome::Superseded);
+        let ack = WriteAck {
+            id: "k1".into(),
+            committed_version: 6,
+        };
+        assert_eq!(
+            on_ack(
+                LocalRow {
+                    version: 5,
+                    dirty: true
+                },
+                &ack
+            ),
+            AckOutcome::Adopt(6)
+        );
+        assert_eq!(
+            on_ack(
+                LocalRow {
+                    version: 6,
+                    dirty: false
+                },
+                &ack
+            ),
+            AckOutcome::Adopt(6)
+        );
+        assert_eq!(
+            on_ack(
+                LocalRow {
+                    version: 7,
+                    dirty: false
+                },
+                &ack
+            ),
+            AckOutcome::Superseded
+        );
     }
 
     #[test]
@@ -259,6 +310,8 @@ mod tests {
         assert_eq!(ev.version, 9);
         assert_eq!(ev.row["name"], "x");
         // round-trips back to the same lowercase-op shape the TS shim expects
-        assert!(serde_json::to_string(&ev).unwrap().contains("\"op\":\"upsert\""));
+        assert!(serde_json::to_string(&ev)
+            .unwrap()
+            .contains("\"op\":\"upsert\""));
     }
 }

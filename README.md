@@ -97,6 +97,25 @@ Sync runs **per plane** — the customer client syncs the customer DB, the admin
 client syncs the admin DB; same code, separate instances, data never crosses.
 See `docs/repo-boundaries.md`.
 
+## Security & hardening
+
+- **Dependency audit.** `cargo audit` is **clean** — no advisories across the 20
+  resolved dependencies (`serde`, `serde_json`, and the optional `wasm-bindgen`
+  tree). No accepted/ignored advisories.
+- **Zero IO, no `unsafe`.** The core is pure decision logic — no filesystem,
+  network, threads, or `unsafe` blocks. `unwrap()` appears only in `#[cfg(test)]`
+  code, never on a runtime path.
+- **Untrusted input at the wasm boundary.** `src/wasm.rs` is the only surface
+  that sees untrusted bytes (JSON from the browser). Every parse goes through
+  `serde_json::from_str(...).map_err(err)?`, so malformed input returns a
+  `JsError` to the caller rather than panicking. Reconcile decisions are total
+  over any `i64` `version`, so a hostile or stale change cannot wedge the engine.
+- **No secrets, no logging.** The crate holds no credentials and emits no logs;
+  tokens (bearer / `access_token`) live only in the JS shim's transport layer.
+- **No env-var config surface.** This crate exposes no environment-variable or
+  CLI configuration — it is a library linked into the wasm bundle and the Rust
+  backends — so there is nothing here for the `flags-2-env` launcher to wrap.
+
 ## Status
 
 - ✅ `fiducia-sync-core` — reconcile + write-queue ack rules, `cargo test` 7/7.

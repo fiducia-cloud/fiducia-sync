@@ -8,7 +8,8 @@
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    on_ack as core_on_ack, reconcile as core_reconcile, ChangeEvent, LocalRow, QueuedWrite, WriteAck,
+    on_ack as core_on_ack, reconcile as core_reconcile, ChangeEvent, LocalRow, QueuedWrite,
+    WriteAck,
 };
 
 fn err<E: std::fmt::Display>(e: E) -> JsError {
