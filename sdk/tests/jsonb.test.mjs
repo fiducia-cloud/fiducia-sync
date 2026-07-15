@@ -120,7 +120,7 @@ test("plain optimisticWrite still REPLACES the row (merge is opt-in via optimist
   });
 });
 
-test("the queued payload of a patch stays PARTIAL (server COALESCEs) while local is merged", async (t) => {
+test("a patch sends the MERGED value (so the server's column-replace keeps sibling jsonb keys)", async (t) => {
   const { store, queue, client } = await setup();
   t.after(() => store.close());
 
@@ -139,12 +139,11 @@ test("the queued payload of a patch stays PARTIAL (server COALESCEs) while local
     },
   );
   const [queued] = await queue.list();
-  assert.deepEqual(queued.payload, { params: { b: 9 } }, "server receives the partial patch, not the merge");
-  assert.deepEqual(
-    await store.get("infra_operations", "op1"),
-    { id: "op1", params: { a: 1, b: 9 } },
-    "local shows the merged optimistic row",
-  );
+  // The backend COALESCEs the whole column, so it must receive the merged jsonb —
+  // a bare {params:{b:9}} would drop params.a server-side and its echo would then
+  // clobber our local merge. Client and server both end at {a:1,b:9}.
+  assert.deepEqual(queued.payload, { id: "op1", params: { a: 1, b: 9 } });
+  assert.deepEqual(await store.get("infra_operations", "op1"), { id: "op1", params: { a: 1, b: 9 } });
 });
 
 test("reconcile round-trips a nested jsonb row unchanged (server is authoritative whole-row)", async (t) => {
