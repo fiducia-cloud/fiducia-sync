@@ -10,3 +10,11 @@ mirror the repo's two build targets from the one Rust crate:
 - **sdk** — builds the node-target wasm with an exact wasm-pack version and a
   locked Cargo graph, then installs SDK dependencies from `package-lock.json`
   and runs the JS suite against it.
+
+## Security baseline
+
+Every executable workflow uses explicit least-privilege permissions, immutable
+third-party action or container references, non-persisted checkout credentials,
+concurrency control, and a job timeout. The main CI workflow validates this
+directory with the digest-pinned actionlint container. Environment mutation is
+forbidden unless this README documents a repository-specific platform exception.
