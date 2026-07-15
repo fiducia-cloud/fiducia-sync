@@ -6,6 +6,8 @@
 // Isolation: one client per plane; the caller passes a store bound to that
 // plane's IndexedDB database. Planes never share.
 
+import { deepMerge } from "./merge.mjs";
+
 /**
  * @param {object} deps
  * @param {object} deps.store  from openStore()
@@ -153,14 +155,28 @@ export function makeSyncClient({ store, queue, core }) {
    * `op:"delete"` optimistically removes the row locally and queues a delete; the
    * row reappears only if the send fails and a later reconcile re-adds it.
    *
+   * With `merge:true` (see optimisticPatch) the local row is `deepMerge(existing,
+   * row)` — the PARTIAL patch is folded into what's stored so sibling fields (and
+   * sibling keys of a nested jsonb object) survive; the queued PAYLOAD stays the
+   * partial patch (the backend COALESCEs it). Default is whole-row replace.
+   *
    * @param {(write:object)=>Promise<{id:string,committed_version:number}>} send
    * @param {"upsert"|"delete"} [op="upsert"]
+   * @param {boolean} [merge=false]
    */
-  async function optimisticWrite(table, id, row, send, op = "upsert") {
+  async function optimisticWrite(table, id, row, send, op = "upsert", merge = false) {
     const { write, seq } = await mutate(async () => {
       const meta = await store.meta(table, id);
       const base_version = meta?.version ?? 0;
-      const payload = op === "delete" ? null : row;
+      // Merge mode: fold the partial patch into the row already held. The mutate
+      // gate serializes this read+merge with every other client state transition,
+      // so it can't race. We send the MERGED value (not the partial): the backend
+      // COALESCEs at the column level, so a partial jsonb would clobber sibling
+      // keys server-side and its authoritative echo would then overwrite our local
+      // merge. Sending the merged whole value keeps client and server consistent.
+      const localRow =
+        merge && op !== "delete" ? deepMerge(await store.get(table, id), row) : row;
+      const payload = op === "delete" ? null : localRow;
       // `key` rides along durably so every retry of this write (here or from
       // flushQueue after a reload) presents the same Idempotency-Key, while a
       // subsequent distinct write to the same row never shares it.
@@ -168,7 +184,7 @@ export function makeSyncClient({ store, queue, core }) {
       // The optimistic row mutation and queue append commit atomically. Splitting
       // them into two transactions would allow a crash to leave a dirty row (or a
       // deleted row) with no durable retry intent.
-      const seq = await queue.enqueueOptimistic(write, row);
+      const seq = await queue.enqueueOptimistic(write, localRow);
       return { write, seq };
     });
 
@@ -201,6 +217,16 @@ export function makeSyncClient({ store, queue, core }) {
   /** Optimistically delete a row (see optimisticWrite with op:"delete"). */
   function optimisticDelete(table, id, send) {
     return optimisticWrite(table, id, null, send, "delete");
+  }
+
+  /**
+   * Optimistic PARTIAL update: deep-merge `patch` into the row already held (so a
+   * single changed field or one key of a nested jsonb object keeps its siblings),
+   * while sending only the partial `patch` to the backend to COALESCE. This is the
+   * right entry point for form/single-field edits (e.g. the htmx extension).
+   */
+  function optimisticPatch(table, id, patch, send, op = "upsert") {
+    return optimisticWrite(table, id, patch, send, op, true);
   }
 
   /**
@@ -310,5 +336,5 @@ export function makeSyncClient({ store, queue, core }) {
     return mutate(() => _hydrate(table, rows, options));
   }
 
-  return { applyChange, optimisticWrite, optimisticDelete, flushQueue, hydrate };
+  return { applyChange, optimisticWrite, optimisticPatch, optimisticDelete, flushQueue, hydrate };
 }

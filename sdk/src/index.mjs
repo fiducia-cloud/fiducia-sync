@@ -20,6 +20,7 @@
 //   });
 
 export { openStore, makeQueue, promisify } from "./store.mjs";
+export { deepMerge } from "./merge.mjs";
 export { wrapCore, loadBrowserCore } from "./core.mjs";
 export { makeSyncClient } from "./client.mjs";
 export { startSync } from "./start.mjs";
