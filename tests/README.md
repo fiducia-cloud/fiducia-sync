@@ -1,5 +1,5 @@
-# Integration tests
+# tests
 
-Cross-module protocol tests for reconciliation, queue acknowledgement, and
-transport-independent convergence. Deterministic unit tests remain beside the
-Rust core and JavaScript shim implementations.
+`core_edge.rs` — adversarial totality tests for the zero-IO reconcile core:
+every i64 input pair must reconcile without panic or overflow (the SDK-side
+suites live in `sdk/tests/`).
