@@ -166,7 +166,15 @@ export function makeSyncClient({ store, queue, core }) {
     const { write, seq } = await mutate(async () => {
       const meta = await store.meta(table, id);
       const base_version = meta?.version ?? 0;
-      const payload = op === "delete" ? null : row;
+      // Merge mode: fold the partial patch into the row already held. The mutate
+      // gate serializes this read+merge with every other client state transition,
+      // so it can't race. We send the MERGED value (not the partial): the backend
+      // COALESCEs at the column level, so a partial jsonb would clobber sibling
+      // keys server-side and its authoritative echo would then overwrite our local
+      // merge. Sending the merged whole value keeps client and server consistent.
+      const localRow =
+        merge && op !== "delete" ? deepMerge(await store.get(table, id), row) : row;
+      const payload = op === "delete" ? null : localRow;
       // `key` rides along durably so every retry of this write (here or from
       // flushQueue after a reload) presents the same Idempotency-Key, while a
       // subsequent distinct write to the same row never shares it.
@@ -174,7 +182,7 @@ export function makeSyncClient({ store, queue, core }) {
       // The optimistic row mutation and queue append commit atomically. Splitting
       // them into two transactions would allow a crash to leave a dirty row (or a
       // deleted row) with no durable retry intent.
-      const seq = await queue.enqueueOptimistic(write, row, { merge });
+      const seq = await queue.enqueueOptimistic(write, localRow);
       return { write, seq };
     });
 
