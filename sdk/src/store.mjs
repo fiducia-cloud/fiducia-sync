@@ -8,6 +8,8 @@
 // Reconcile DECISIONS live in the wasm core (fiducia-sync-core); this module is
 // pure IO so it can be unit-tested with fake-indexeddb, no browser needed.
 
+import { deepMerge } from "./merge.mjs";
+
 /** Promisify an IDBRequest. */
 export function promisify(request) {
   return new Promise((resolve, reject) => {
