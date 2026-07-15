@@ -153,10 +153,16 @@ export function makeSyncClient({ store, queue, core }) {
    * `op:"delete"` optimistically removes the row locally and queues a delete; the
    * row reappears only if the send fails and a later reconcile re-adds it.
    *
+   * With `merge:true` (see optimisticPatch) the local row is `deepMerge(existing,
+   * row)` — the PARTIAL patch is folded into what's stored so sibling fields (and
+   * sibling keys of a nested jsonb object) survive; the queued PAYLOAD stays the
+   * partial patch (the backend COALESCEs it). Default is whole-row replace.
+   *
    * @param {(write:object)=>Promise<{id:string,committed_version:number}>} send
    * @param {"upsert"|"delete"} [op="upsert"]
+   * @param {boolean} [merge=false]
    */
-  async function optimisticWrite(table, id, row, send, op = "upsert") {
+  async function optimisticWrite(table, id, row, send, op = "upsert", merge = false) {
     const { write, seq } = await mutate(async () => {
       const meta = await store.meta(table, id);
       const base_version = meta?.version ?? 0;
@@ -168,7 +174,7 @@ export function makeSyncClient({ store, queue, core }) {
       // The optimistic row mutation and queue append commit atomically. Splitting
       // them into two transactions would allow a crash to leave a dirty row (or a
       // deleted row) with no durable retry intent.
-      const seq = await queue.enqueueOptimistic(write, row);
+      const seq = await queue.enqueueOptimistic(write, row, { merge });
       return { write, seq };
     });
 
