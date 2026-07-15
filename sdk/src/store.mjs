@@ -209,7 +209,7 @@ export function makeQueue(store) {
      * A crash or IndexedDB abort can therefore leave neither change, but never
      * a dirty/deleted row whose only durable resend intent is missing.
      */
-    async enqueueOptimistic(write, row) {
+    async enqueueOptimistic(write, row, { merge = false } = {}) {
       return withTransaction(
         db,
         [write.table, QUEUE_STORE],
@@ -217,15 +217,27 @@ export function makeQueue(store) {
         async (transaction) => {
           const rows = transaction.objectStore(write.table);
           const queued = transaction.objectStore(QUEUE_STORE);
-          const mutation =
-            write.op === "delete"
-              ? rows.delete(write.id)
-              : rows.put({
-                  id: write.id,
-                  row,
-                  version: write.base_version,
-                  dirty: true,
-                });
+          let mutation;
+          if (write.op === "delete") {
+            mutation = rows.delete(write.id);
+          } else {
+            let nextRow = row;
+            if (merge) {
+              // Fold the partial patch into the row already held so a single-field
+              // (or single jsonb-key) edit never clobbers its siblings. The read +
+              // merge + put stay in THIS transaction, so the merge cannot race a
+              // concurrent write. `put` is created synchronously once `get`
+              // resolves, keeping the transaction active across the await.
+              const existing = await promisify(rows.get(write.id));
+              nextRow = deepMerge(existing?.row, row);
+            }
+            mutation = rows.put({
+              id: write.id,
+              row: nextRow,
+              version: write.base_version,
+              dirty: true,
+            });
+          }
           const queueRequest = queued.add({ ...write, attempts: 0 });
           const [, seq] = await Promise.all([
             promisify(mutation),
