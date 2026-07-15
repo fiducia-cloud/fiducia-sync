@@ -15,27 +15,40 @@ jobs:
   core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features --locked
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        with:
+          tool: cargo-audit@0.22.2
+      - run: cargo audit
 
   # Build the node-target WASM from the same crate, then run the SDK tests that
   # import ../pkg-node.
   sdk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: "1.95.0"
           targets: wasm32-unknown-unknown
-      - uses: jetli/wasm-pack-action@v0.4.0
-      - uses: actions/setup-node@v6
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
-          node-version: "22"
+          tool: wasm-pack@0.15.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "22.22.1"
       - name: build node-target wasm
-        run: wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm
+        run: wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm --locked
       - name: sdk tests
         working-directory: sdk
         run: |
-          npm ci
+          npm ci --ignore-scripts
           node --test tests/*.test.mjs
+          npm audit --audit-level=high

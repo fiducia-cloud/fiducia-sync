@@ -61,6 +61,133 @@ test("two optimistic writes to the same row before either acks converge to serve
   assert.equal((await queue.list()).length, 0);
 });
 
+test("acking an older write keeps a newer queued edit dirty and conflict-visible", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "v2" }, { version: 2, dirty: false });
+  let acknowledgeFirst;
+  const first = client.optimisticWrite(
+    "api_keys",
+    "k1",
+    { name: "edit-1" },
+    () => new Promise((resolve) => {
+      acknowledgeFirst = resolve;
+    }),
+  );
+  // Let the first write commit its IndexedDB transaction and enter send().
+  while (!acknowledgeFirst) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const second = await client.optimisticWrite(
+    "api_keys",
+    "k1",
+    { name: "edit-2" },
+    async () => {
+      throw new Error("offline");
+    },
+  );
+  assert.equal(second.status, "queued");
+  acknowledgeFirst({ id: "k1", committed_version: 3 });
+  assert.equal((await first).status, "acked");
+
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "edit-2" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 3,
+    dirty: true,
+  });
+  assert.equal((await queue.list()).length, 1);
+
+  // A third-party v4 must resolve against the still-pending second edit, not be
+  // mistaken for a clean apply that leaves a stale queue entry behind.
+  const outcome = await client.applyChange(change({
+    version: 4,
+    row: { name: "server-v4" },
+    write_key: "third-party-v4",
+  }));
+  assert.equal(outcome, "conflict-resolved");
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "server-v4" });
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("out-of-order keyed echoes never downgrade a newer committed version", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "edit-2" }, { version: 2, dirty: true });
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: { name: "edit-1" },
+    base_version: 2,
+    key: "write-1",
+  });
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: { name: "edit-2" },
+    base_version: 2,
+    key: "write-2",
+  });
+
+  assert.equal(
+    await client.applyChange(change({ version: 4, write_key: "write-2" })),
+    "echo-adopted",
+  );
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 4,
+    dirty: true,
+  });
+
+  assert.equal(
+    await client.applyChange(change({ version: 3, write_key: "write-1" })),
+    "echo-adopted",
+  );
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 4,
+    dirty: false,
+  });
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("an older upsert echo cannot resurrect a newer queued optimistic delete", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: { name: "older" },
+    base_version: 2,
+    key: "older-upsert",
+  });
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "delete",
+    payload: null,
+    base_version: 2,
+    key: "newer-delete",
+  });
+
+  assert.equal(
+    await client.applyChange(change({
+      version: 3,
+      row: { name: "older" },
+      write_key: "older-upsert",
+    })),
+    "echo-adopted",
+  );
+  assert.equal(await store.get("api_keys", "k1"), null);
+  const remaining = await queue.list();
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].key, "newer-delete");
+});
+
 test("hydrate that includes the committed version of a queued write dequeues it (no stuck dirty)", async (t) => {
   const { store, queue, client } = await setup();
   t.after(() => store.close());
@@ -77,17 +204,7 @@ test("hydrate that includes the committed version of a queued write dequeues it 
   assert.equal((await queue.list()).length, 0, "the queued write was adopted, not left stuck");
 });
 
-// KNOWN LIMITATION (todo): own-echo detection is version-only —
-// `isOwnEcho` = (incoming.id == queued.id && incoming.version == base_version + 1).
-// A THIRD-PARTY commit that lands at exactly our base+1 (both edits based on the
-// same version) is therefore indistinguishable from our own echo. When our own
-// send has NOT committed (offline/lost), the echo fast-path drops our queued write
-// AND keeps our un-committed content at the third party's version — a lost write +
-// divergence that only heals on the next change to the row. Proper fix: carry a
-// client-generated write token in the queued write and have the backend echo it
-// back in the ChangeEvent, so echo matching keys on the token, not on the version.
-// Marked `todo` so it documents the contract without failing CI until that lands.
-test("a THIRD-PARTY change landing at our base+1 must not leave local showing our un-committed content", { todo: "needs a server-echoed client write token to disambiguate own-echo from a base+1 collision" }, async (t) => {
+test("a THIRD-PARTY change landing at our base+1 cannot impersonate our keyed echo", async (t) => {
   const { store, queue, client } = await setup();
   t.after(() => store.close());
 
@@ -98,18 +215,192 @@ test("a THIRD-PARTY change landing at our base+1 must not leave local showing ou
     throw new Error("offline");
   });
   assert.equal(res.status, "queued");
+  const [ours] = await queue.list();
+  assert.ok(ours.key, "new queue rows carry an authoritative echo token");
 
   // A DIFFERENT client commits v3 (also based on v2) with different content. Its
-  // change arrives over the transport. isOwnEcho matches on id + version==base+1,
-  // so it can be mistaken for our echo — but the CONVERGENT outcome is that local
-  // reflects the server's v3 content, never our un-committed edit.
-  await client.applyChange(change({ version: 3, row: { name: "theirs" } }));
+  // event carries that client's token. Even though v3 equals our expected legacy
+  // echo version, the token mismatch forces ordinary conflict reconciliation.
+  const outcome = await client.applyChange(change({
+    version: 3,
+    row: { name: "theirs" },
+    write_key: "someone-elses-write",
+  }));
+  assert.equal(outcome, "conflict-resolved");
   assert.deepEqual(
     await store.get("api_keys", "k1"),
     { name: "theirs" },
     "local must converge to the server's v3 content, not keep our un-committed edit",
   );
   assert.equal((await store.meta("api_keys", "k1")).version, 3);
+  assert.equal((await queue.list()).length, 0, "the stale local write is retired");
+});
+
+test("a keyed own echo matches by token even when its committed version drifted", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "mine" }, { version: 2, dirty: true });
+  await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: { name: "mine" },
+    base_version: 2,
+    key: "our-write",
+  });
+
+  // Other commits may advance the row before our write is serialized. The
+  // echoed token, not base+1, authoritatively identifies our eventual commit.
+  const outcome = await client.applyChange(change({
+    version: 7,
+    row: { name: "mine" },
+    write_key: "our-write",
+  }));
+  assert.equal(outcome, "echo-adopted");
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 7,
+    dirty: false,
+  });
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("concurrent transport callbacks are serialized and cannot downgrade a row", async (t) => {
+  const { store, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "v2" }, { version: 2, dirty: false });
+  const older = client.applyChange(change({ version: 3, row: { name: "v3" } }));
+  const newer = client.applyChange(change({ version: 4, row: { name: "v4" } }));
+  await Promise.all([older, newer]);
+
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "v4" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 4,
+    dirty: false,
+  });
+});
+
+test("an ack cannot relabel a conflict payload before its exact echo arrives", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "v2" }, { version: 2, dirty: false });
+  let acknowledge;
+  let sent;
+  const pending = client.optimisticWrite(
+    "api_keys",
+    "k1",
+    { name: "mine-v4" },
+    (write) => {
+      sent = write;
+      return new Promise((resolve) => {
+        acknowledge = resolve;
+      });
+    },
+  );
+  while (!acknowledge) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(
+    await client.applyChange(change({
+      version: 3,
+      row: { name: "theirs-v3" },
+      write_key: "third-party",
+    })),
+    "conflict-resolved",
+  );
+  assert.equal((await queue.list()).length, 0);
+
+  acknowledge({ id: "k1", committed_version: 4 });
+  assert.equal((await pending).status, "acked");
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "theirs-v3" });
+  assert.equal((await store.meta("api_keys", "k1")).version, 3);
+
+  assert.equal(
+    await client.applyChange(change({
+      version: 4,
+      row: { name: "mine-v4-normalized" },
+      write_key: sent.key,
+    })),
+    "applied",
+  );
+  assert.deepEqual(await store.get("api_keys", "k1"), {
+    name: "mine-v4-normalized",
+  });
+});
+
+test("ack-before-echo still adopts the authoritative equal-version payload", async (t) => {
+  const { store, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "v2" }, { version: 2, dirty: false });
+  let writeKey;
+  await client.optimisticWrite("api_keys", "k1", { name: "optimistic" }, async (write) => {
+    writeKey = write.key;
+    return { id: "k1", committed_version: 3 };
+  });
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "optimistic" });
+
+  assert.equal(
+    await client.applyChange(change({
+      version: 3,
+      row: { name: "server-normalized" },
+      write_key: writeKey,
+    })),
+    "refreshed",
+  );
+  assert.deepEqual(await store.get("api_keys", "k1"), {
+    name: "server-normalized",
+  });
+});
+
+test("a malformed acknowledgement stays durable for retry", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  const result = await client.optimisticWrite(
+    "api_keys",
+    "k1",
+    { name: "mine" },
+    async () => ({ id: "wrong-row", committed_version: 1 }),
+  );
+  assert.equal(result.status, "queued");
+  assert.equal((await queue.list()).length, 1);
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 0,
+    dirty: true,
+  });
+});
+
+test("a newer delete echo cannot be undone by an older out-of-order upsert", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k1", { name: "latest" }, { version: 2, dirty: true });
+  await queue.enqueue({
+    id: "k1", table: "api_keys", op: "upsert", payload: { name: "older" },
+    base_version: 2, key: "older-upsert",
+  });
+  await queue.enqueue({
+    id: "k1", table: "api_keys", op: "delete", payload: null,
+    base_version: 2, key: "newer-delete",
+  });
+
+  assert.equal(
+    await client.applyChange(change({
+      op: "delete", version: 4, row: null, write_key: "newer-delete",
+    })),
+    "echo-adopted",
+  );
+  assert.equal(await store.get("api_keys", "k1"), null);
+  assert.equal(
+    await client.applyChange(change({
+      version: 3, row: { name: "older" }, write_key: "older-upsert",
+    })),
+    "echo-adopted",
+  );
+  assert.equal(await store.get("api_keys", "k1"), null);
+  assert.equal((await queue.list()).length, 0);
 });
 
 test("openStore adds a new table to an existing database without losing prior data", async (t) => {

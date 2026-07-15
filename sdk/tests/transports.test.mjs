@@ -10,12 +10,16 @@ test("decodeBackendMessage extracts valid changes from a sync frame, ignores oth
     event: "fiducia:sync",
     changes: [
       { table: "api_keys", op: "upsert", id: "k1", version: 3, row: { id: "k1" }, at_ms: 1 },
+      { table: "api_keys", op: "upsert", id: "k3", version: 4, write_key: "write-3" },
       { table: "api_keys", op: "bogus", id: "k2", version: 1 }, // invalid op -> dropped
+      { table: "api_keys", op: "upsert", id: "unsafe", version: Number.MAX_SAFE_INTEGER + 1 },
+      { table: "api_keys", op: "upsert", id: "bad-token", version: 5, write_key: 42 },
     ],
   });
   const out = decodeBackendMessage(frame);
-  assert.equal(out.length, 1);
+  assert.equal(out.length, 2);
   assert.equal(out[0].id, "k1");
+  assert.equal(out[1].write_key, "write-3");
 
   assert.deepEqual(decodeBackendMessage("not json"), []);
   assert.deepEqual(decodeBackendMessage(JSON.stringify({ event: "fiducia:refresh" })), []);
@@ -50,6 +54,8 @@ test("decodeSupabaseChange refuses to fabricate a version (deletes without REPLI
   assert.equal(decodeSupabaseChange("api_keys", { eventType: "DELETE", old: { id: "k1" } }), null);
   // An UPDATE without a version is likewise unorderable -> null.
   assert.equal(decodeSupabaseChange("api_keys", { eventType: "UPDATE", new: { id: "k1", name: "x" } }), null);
+  assert.equal(decodeSupabaseChange("api_keys", { eventType: "UPDATE", new: { id: "k1", version: 1.5 } }), null);
+  assert.equal(decodeSupabaseChange("api_keys", { eventType: "UPDATE", new: { id: "k1", version: "9007199254740992" } }), null);
   // commit_timestamp is surfaced as at_ms when present.
   const c = decodeSupabaseChange("api_keys", {
     eventType: "INSERT",

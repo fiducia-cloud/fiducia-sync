@@ -275,6 +275,7 @@ export function connectBackend({
  * @param {object} [opts]
  * @param {string} [opts.pathPrefix="/api/customer/sync"]
  * @param {()=>(string|Promise<string|null>)} [opts.getToken]
+ * @param {string} [opts.csrfToken] same-origin CSRF token for cookie-authenticated writes
  * @param {string} [opts.idempotencyKey]  override the key
  * @param {Function} [opts.fetchImpl=fetch]
  * @returns {Promise<{id:string, committed_version:number}>}
@@ -283,9 +284,20 @@ export async function backendSend(baseUrl, write, opts = {}) {
   const {
     pathPrefix = "/api/customer/sync",
     getToken,
+    csrfToken,
     idempotencyKey,
     fetchImpl = fetch,
   } = opts;
+
+  if (
+    idempotencyKey != null &&
+    write.key != null &&
+    idempotencyKey !== write.key
+  ) {
+    throw new Error(
+      "explicit Idempotency-Key does not match the queued write key",
+    );
+  }
 
   const url = new URL(
     `${trimSlash(pathPrefix)}/${encodeURIComponent(write.table)}`,
@@ -296,7 +308,16 @@ export async function backendSend(baseUrl, write, opts = {}) {
     idempotencyKey ??
     write.key ??
     `${write.table}:${write.id}:${write.op ?? "upsert"}:${write.base_version}`;
+  if (typeof key !== "string" || key.trim() === "") {
+    throw new Error("sync write Idempotency-Key is empty or invalid");
+  }
   const headers = { "content-type": "application/json", "idempotency-key": key };
+  if (csrfToken !== undefined && csrfToken !== null) {
+    if (typeof csrfToken !== "string" || csrfToken.trim() === "") {
+      throw new Error("sync write CSRF token is empty");
+    }
+    headers["x-fiducia-csrf"] = csrfToken;
+  }
   if (getToken) {
     const token = await getToken();
     if (typeof token !== "string" || token.trim() === "") {
@@ -311,7 +332,17 @@ export async function backendSend(baseUrl, write, opts = {}) {
     body: JSON.stringify(write),
   });
   if (!res.ok) throw new Error(`sync write failed: ${res.status}`);
-  return res.json();
+  const ack = await res.json();
+  if (!ack || typeof ack !== "object" || ack.id !== write.id) {
+    throw new Error("sync write acknowledgement id does not match the request");
+  }
+  if (
+    !Number.isSafeInteger(ack.committed_version) ||
+    ack.committed_version < 0
+  ) {
+    throw new Error("sync write acknowledgement has an invalid committed_version");
+  }
+  return ack;
 }
 
 /**

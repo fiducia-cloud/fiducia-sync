@@ -170,7 +170,7 @@ test("query-token mode reports auth failure and opens no unauthenticated socket"
   assert.match(statuses[0].error.message, /no token/);
 });
 
-test("backendSend targets the plane path, sets a stable Idempotency-Key + bearer auth", async () => {
+test("backendSend sets plane, idempotency, bearer, and same-origin CSRF headers", async () => {
   let captured;
   const fetchImpl = async (url, init) => {
     captured = { url, init };
@@ -179,11 +179,17 @@ test("backendSend targets the plane path, sets a stable Idempotency-Key + bearer
   const ack = await backendSend(
     "http://localhost",
     { id: "k1", table: "api_keys", op: "upsert", base_version: 3 },
-    { pathPrefix: "/api/admin/sync", getToken: () => "tok", fetchImpl },
+    {
+      pathPrefix: "/api/admin/sync",
+      getToken: () => "tok",
+      csrfToken: "csrf-bound-to-session",
+      fetchImpl,
+    },
   );
   assert.equal(captured.url, "http://localhost/api/admin/sync/api_keys");
   assert.equal(captured.init.headers["idempotency-key"], "api_keys:k1:upsert:3");
   assert.equal(captured.init.headers["authorization"], "Bearer tok");
+  assert.equal(captured.init.headers["x-fiducia-csrf"], "csrf-bound-to-session");
   assert.deepEqual(ack, { id: "k1", committed_version: 7 });
 });
 
@@ -212,6 +218,15 @@ test("backendSend throws on a non-2xx response; makeBackendSend binds config", a
       ),
     /token provider returned no token/,
   );
+  await assert.rejects(
+    () =>
+      backendSend(
+        "http://x",
+        { id: "a", table: "api_keys", op: "upsert", base_version: 0 },
+        { csrfToken: "", fetchImpl: fetchOk },
+      ),
+    /CSRF token is empty/,
+  );
 });
 
 test("backendSend prefers the write's durable per-write key over the legacy derivation", async () => {
@@ -227,11 +242,46 @@ test("backendSend prefers the write's durable per-write key over the legacy deri
   );
   assert.equal(captured.init.headers["idempotency-key"], "w-unique-1");
 
-  // An explicit override still wins over both.
+  // A different override would put one identity in the header and another in
+  // the durable body. Canonical servers reject that ambiguity before writing.
+  await assert.rejects(
+    () =>
+      backendSend(
+        "http://localhost",
+        { id: "k1", table: "api_keys", op: "upsert", base_version: 3, key: "w-unique-1" },
+        { fetchImpl, idempotencyKey: "explicit" },
+      ),
+    /does not match the queued write key/,
+  );
+
   await backendSend(
     "http://localhost",
     { id: "k1", table: "api_keys", op: "upsert", base_version: 3, key: "w-unique-1" },
-    { fetchImpl, idempotencyKey: "explicit" },
+    { fetchImpl, idempotencyKey: "w-unique-1" },
   );
-  assert.equal(captured.init.headers["idempotency-key"], "explicit");
+  assert.equal(captured.init.headers["idempotency-key"], "w-unique-1");
+});
+
+test("backendSend rejects wrong-row and unsafe acknowledgements", async () => {
+  const write = { id: "k1", table: "api_keys", op: "upsert", base_version: 3 };
+  await assert.rejects(
+    () =>
+      backendSend("http://localhost", write, {
+        fetchImpl: async () => ({
+          ok: true,
+          json: async () => ({ id: "k2", committed_version: 4 }),
+        }),
+      }),
+    /id does not match/,
+  );
+  await assert.rejects(
+    () =>
+      backendSend("http://localhost", write, {
+        fetchImpl: async () => ({
+          ok: true,
+          json: async () => ({ id: "k1", committed_version: Number.MAX_SAFE_INTEGER + 1 }),
+        }),
+      }),
+    /invalid committed_version/,
+  );
 });

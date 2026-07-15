@@ -17,6 +17,7 @@ fn ev(op: ChangeOp, version: i64) -> ChangeEvent {
         version,
         row: serde_json::Value::Null,
         at_ms: 0,
+        write_key: None,
     }
 }
 
@@ -34,7 +35,11 @@ fn reconcile_is_total_and_monotone_over_i64_extremes() {
                     let local = LocalRow { version: lv, dirty };
                     let decision = reconcile(Some(local), &ev(op, iv));
                     if iv < lv {
-                        assert_eq!(decision, Reconcile::Ignore(IgnoreReason::Stale), "iv<lv stale");
+                        assert_eq!(
+                            decision,
+                            Reconcile::Ignore(IgnoreReason::Stale),
+                            "iv<lv stale"
+                        );
                     } else if iv == lv {
                         assert_eq!(
                             decision,
@@ -74,14 +79,22 @@ fn echo_detection_saturates_and_never_overflows_at_i64_max() {
         op: ChangeOp::Upsert,
         payload: serde_json::Value::Null,
         base_version: i64::MAX,
+        key: None,
     };
-    assert_eq!(queued.expected_version(), i64::MAX, "saturates, no overflow panic");
+    assert_eq!(
+        queued.expected_version(),
+        i64::MAX,
+        "saturates, no overflow panic"
+    );
     // is_echo_of over the extremes never panics.
     for &iv in &EXTREMES {
         let _ = queued.is_echo_of(&ev(ChangeOp::Upsert, iv));
     }
     // A normal base still detects its echo precisely.
-    let q2 = QueuedWrite { base_version: 5, ..queued };
+    let q2 = QueuedWrite {
+        base_version: 5,
+        ..queued
+    };
     assert!(q2.is_echo_of(&ev(ChangeOp::Upsert, 6)));
     assert!(!q2.is_echo_of(&ev(ChangeOp::Upsert, 7)));
 }
@@ -90,7 +103,16 @@ fn echo_detection_saturates_and_never_overflows_at_i64_max() {
 fn on_ack_is_total_at_extremes() {
     for &lv in &EXTREMES {
         for &cv in &EXTREMES {
-            let outcome = on_ack(LocalRow { version: lv, dirty: true }, &WriteAck { id: "k1".into(), committed_version: cv });
+            let outcome = on_ack(
+                LocalRow {
+                    version: lv,
+                    dirty: true,
+                },
+                &WriteAck {
+                    id: "k1".into(),
+                    committed_version: cv,
+                },
+            );
             if lv <= cv {
                 assert_eq!(outcome, AckOutcome::Adopt(cv));
             } else {
@@ -108,29 +130,47 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
     assert_eq!(apply, "\"Apply\"");
 
     let stale = serde_json::to_string(&reconcile(
-        Some(LocalRow { version: 5, dirty: false }),
+        Some(LocalRow {
+            version: 5,
+            dirty: false,
+        }),
         &ev(ChangeOp::Upsert, 4),
     ))
     .unwrap();
     assert_eq!(stale, "{\"Ignore\":\"Stale\"}");
 
     let conflict = serde_json::to_string(&reconcile(
-        Some(LocalRow { version: 5, dirty: true }),
+        Some(LocalRow {
+            version: 5,
+            dirty: true,
+        }),
         &ev(ChangeOp::Upsert, 6),
     ))
     .unwrap();
     assert_eq!(conflict, "\"Conflict\"");
 
     let adopt = serde_json::to_string(&on_ack(
-        LocalRow { version: 5, dirty: true },
-        &WriteAck { id: "k1".into(), committed_version: 6 },
+        LocalRow {
+            version: 5,
+            dirty: true,
+        },
+        &WriteAck {
+            id: "k1".into(),
+            committed_version: 6,
+        },
     ))
     .unwrap();
     assert_eq!(adopt, "{\"Adopt\":6}");
 
     let superseded = serde_json::to_string(&on_ack(
-        LocalRow { version: 9, dirty: false },
-        &WriteAck { id: "k1".into(), committed_version: 6 },
+        LocalRow {
+            version: 9,
+            dirty: false,
+        },
+        &WriteAck {
+            id: "k1".into(),
+            committed_version: 6,
+        },
     ))
     .unwrap();
     assert_eq!(superseded, "\"Superseded\"");
@@ -140,5 +180,7 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
     let decoded: ChangeEvent = serde_json::from_str(wire).unwrap();
     assert_eq!(decoded.op, ChangeOp::Delete);
     assert_eq!(decoded.version, i64::MAX);
-    assert!(serde_json::to_string(&decoded).unwrap().contains("\"op\":\"delete\""));
+    assert!(serde_json::to_string(&decoded)
+        .unwrap()
+        .contains("\"op\":\"delete\""));
 }

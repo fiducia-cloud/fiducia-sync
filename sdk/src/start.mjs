@@ -19,7 +19,7 @@ import { subscribeSupabase } from "./transports/supabase.mjs";
  * @param {string}   o.dbName            per-plane IndexedDB name ("fiducia-customer"/"fiducia-admin")
  * @param {string[]} o.tables            synced tables
  * @param {object}   [o.core]            a wrapped core; defaults to loadBrowserCore()
- * @param {object|false} [o.backend]     { baseUrl, wsPath?, ssePath?, pathPrefix?, getToken?, streamAuth? }
+ * @param {object|false} [o.backend]     { baseUrl, wsPath?, ssePath?, pathPrefix?, getToken?, csrfToken?, streamAuth? }
  * @param {object|false} [o.supabase]    { client, filter?, channelName? }
  * @param {(table:string)=>Promise<object[]>} [o.hydrateFetch] catch-up snapshot fetch
  * @param {(status:string, err?:Error)=>void} [o.onStatus]
@@ -51,6 +51,7 @@ export async function startSync({
     ? makeBackendSend(backend.baseUrl, {
         pathPrefix: backend.pathPrefix,
         getToken: backend.getToken,
+        csrfToken: backend.csrfToken,
       })
     : undefined;
 

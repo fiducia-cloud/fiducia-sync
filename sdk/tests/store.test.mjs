@@ -69,6 +69,138 @@ test("write-queue enqueues durably, lists in order, bumps attempts, removes", as
   assert.equal(items[0].id, "k2");
 });
 
+test("optimistic row mutation and queue append commit atomically", async (t) => {
+  const store = await freshStore();
+  t.after(() => store.close());
+  const queue = makeQueue(store);
+
+  await store.put("api_keys", "k1", { name: "before" }, { version: 2 });
+  const occupiedSeq = await queue.enqueue({
+    id: "occupied",
+    table: "api_keys",
+    op: "upsert",
+    base_version: 0,
+  });
+
+  // Force the queue half to fail after the row mutation was issued by reusing
+  // an occupied auto-increment key. The shared transaction must roll back both.
+  await assert.rejects(() =>
+    queue.enqueueOptimistic(
+      {
+        seq: occupiedSeq,
+        id: "k1",
+        table: "api_keys",
+        op: "upsert",
+        base_version: 2,
+        key: "write-will-abort",
+      },
+      { name: "must-not-land" },
+    ),
+  );
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "before" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 2,
+    dirty: false,
+  });
+  assert.equal((await queue.list()).length, 1);
+
+  const seq = await queue.enqueueOptimistic(
+    {
+      id: "k1",
+      table: "api_keys",
+      op: "upsert",
+      base_version: 2,
+      key: "write-commits",
+    },
+    { name: "after" },
+  );
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "after" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 2,
+    dirty: true,
+  });
+  assert.equal((await queue.list()).some((write) => write.seq === seq), true);
+});
+
+test("server-wins state and stale queue removal commit together", async (t) => {
+  const store = await freshStore();
+  t.after(() => store.close());
+  const queue = makeQueue(store);
+
+  await store.put("api_keys", "k1", { name: "mine" }, { version: 2, dirty: true });
+  const seq = await queue.enqueue({
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    base_version: 2,
+    key: "stale-write",
+  });
+  await queue.resolveConflict(
+    {
+      table: "api_keys",
+      id: "k1",
+      op: "upsert",
+      version: 3,
+      row: { name: "server" },
+    },
+    [seq],
+  );
+
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "server" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 3,
+    dirty: false,
+  });
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("ack settlement is atomic and a retired sequence cannot relabel server state", async (t) => {
+  const store = await freshStore();
+  t.after(() => store.close());
+  const queue = makeQueue(store);
+
+  await store.put("api_keys", "k1", { name: "optimistic" }, { version: 2, dirty: true });
+  const seq = await queue.enqueue({
+    id: "k1", table: "api_keys", op: "upsert", base_version: 2, key: "write-1",
+  });
+  assert.deepEqual(await queue.settleAck("api_keys", "k1", seq, 3), { Adopt: 3 });
+  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
+  assert.equal((await queue.list()).length, 0);
+
+  await store.put("api_keys", "k1", { name: "server-conflict" }, { version: 4, dirty: false });
+  assert.equal(await queue.settleAck("api_keys", "k1", seq, 5), "Missing");
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "server-conflict" });
+  assert.equal((await store.meta("api_keys", "k1")).version, 4);
+});
+
+test("an echo transaction abort restores both the row and queue entry", async (t) => {
+  const store = await freshStore();
+  t.after(() => store.close());
+  const queue = makeQueue(store);
+
+  await store.put("api_keys", "k1", { name: "optimistic" }, { version: 2, dirty: true });
+  const seq = await queue.enqueue({
+    id: "k1", table: "api_keys", op: "upsert", base_version: 2, key: "write-1",
+  });
+  await assert.rejects(() =>
+    queue.adoptEcho(
+      {
+        table: "api_keys",
+        id: "k1",
+        op: "upsert",
+        version: 3,
+        // Functions cannot be structured-cloned into IndexedDB, forcing the row
+        // half to fail. The shared transaction must preserve both old records.
+        row: { invalid: () => {} },
+      },
+      seq,
+    ),
+  );
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "optimistic" });
+  assert.equal((await queue.list()).length, 1);
+  assert.equal((await queue.list())[0].seq, seq);
+});
+
 test("openStore upgrades an existing database without losing rows or queued writes", async (t) => {
   dbCounter += 1;
   const dbName = `fiducia-upgrade-test-${dbCounter}`;

@@ -48,11 +48,11 @@ pub struct ChangeEvent {
     #[serde(default)]
     pub at_ms: i64,
     /// The client-minted write token ([`QueuedWrite::key`]) echoed back by the
-    /// backend when this change was caused by a sync write. When present on
-    /// BOTH sides, echo matching keys on the token instead of the
-    /// `base_version + 1` heuristic, which cannot distinguish our own echo from
-    /// a third-party commit landing at exactly the same version. Absent (older
-    /// backends, Supabase CDC), matching falls back to the version heuristic.
+    /// backend when this change was caused by a sync write. A newly queued
+    /// write carries a key, so only the same key can identify its echo; a
+    /// missing or different event key is treated as an ordinary server change.
+    /// The `base_version + 1` heuristic remains only for legacy queued records
+    /// that predate write keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_key: Option<String>,
 }
@@ -83,7 +83,7 @@ pub enum Reconcile {
     /// Local has an un-acked optimistic edit AND the server advanced past it.
     /// Resolve via [`resolve_conflict`] (default: server wins). NB: an echo of
     /// our OWN in-flight write is not a real conflict — callers should match it
-    /// against the write-queue via [`QueuedWrite::expected_version`] first.
+    /// against the write-queue via [`QueuedWrite::is_echo_of`] first.
     Conflict,
 }
 
@@ -159,17 +159,16 @@ impl QueuedWrite {
 
     /// True if `incoming` is the realtime echo of this queued write.
     ///
-    /// When both this write and the incoming change carry the client-minted
-    /// write token, the token alone decides: a match is our echo even if the
-    /// committed version drifted past `base_version + 1`, and a mismatch is a
-    /// third-party commit even if it landed at exactly `base_version + 1`.
-    /// Without a token on either side, the version heuristic applies.
+    /// A keyed write requires an exact event-token match: a match is our echo
+    /// even if the committed version drifted past `base_version + 1`, while a
+    /// missing or different token is not our echo even at exactly that version.
+    /// Only legacy queue records with no key use the version heuristic.
     pub fn is_echo_of(&self, incoming: &ChangeEvent) -> bool {
         if incoming.table != self.table || incoming.id != self.id || incoming.op != self.op {
             return false;
         }
-        if let (Some(mine), Some(theirs)) = (self.key.as_deref(), incoming.write_key.as_deref()) {
-            return mine == theirs;
+        if let Some(mine) = self.key.as_deref() {
+            return incoming.write_key.as_deref() == Some(mine);
         }
         self.base_version
             .checked_add(1)
@@ -214,6 +213,7 @@ mod tests {
             version,
             row: json!({ "name": "prod" }),
             at_ms: 1000,
+            write_key: None,
         }
     }
 
@@ -286,6 +286,7 @@ mod tests {
             op: ChangeOp::Upsert,
             payload: json!({ "name": "prod" }),
             base_version: 5,
+            key: None,
         };
         assert_eq!(queued.expected_version(), 6);
         assert!(queued.is_echo_of(&ev(ChangeOp::Upsert, 6))); // our own commit echoing back
@@ -302,6 +303,29 @@ mod tests {
         };
         assert_eq!(overflow.expected_version(), i64::MAX);
         assert!(!overflow.is_echo_of(&ev(ChangeOp::Upsert, i64::MAX)));
+    }
+
+    #[test]
+    fn keyed_echo_requires_the_exact_token() {
+        let queued = QueuedWrite {
+            id: "k1".into(),
+            table: "api_keys".into(),
+            op: ChangeOp::Upsert,
+            payload: json!({ "name": "mine" }),
+            base_version: 5,
+            key: Some("write-mine".into()),
+        };
+
+        let mut incoming = ev(ChangeOp::Upsert, 99);
+        incoming.write_key = Some("write-mine".into());
+        assert!(queued.is_echo_of(&incoming));
+
+        incoming.version = 6;
+        incoming.write_key = Some("write-someone-else".into());
+        assert!(!queued.is_echo_of(&incoming));
+
+        incoming.write_key = None;
+        assert!(!queued.is_echo_of(&incoming));
     }
 
     #[test]

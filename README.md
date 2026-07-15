@@ -11,7 +11,7 @@ The correctness-critical logic lives in **`fiducia-sync-core`** (this crate) —
 version reconciliation, conflict policy, and the optimistic write-queue ack
 rules, with **zero IO**. It builds:
 
-- **native** (`cargo test`) — verified here, and reusable **server-side** so the
+- **native** (`cargo test --locked`) — verified here, and reusable **server-side** so the
   Rust backends and the browser agree on one sync protocol; and
 - **wasm** (`--features wasm`, via `wasm-bindgen`) — the browser core.
 
@@ -37,16 +37,27 @@ browser IO:
                         #   → reconcile on ack; offline-capable
 ```
 
-## The ordering key
+## Ordering: row versions and the catch-up cursor
 
-Every synced Postgres row carries a monotonic `version` (the `bump_row_version`
-trigger in `fiducia-interfaces` — note it advances on UPDATE; INSERT lands at the
-`default 1`). All reconcile decisions use `version` alone, so the two transports
-can deliver the same change in any order and converge — duplicate delivery is a
-no-op (a re-seen version is Ignored). Row shapes are the generated types from
-`@fiducia/interfaces/db/*`; the `{table, op, id, version, row, at_ms}` change
-envelope is this SDK's contract (it is distinct from the KV/election `ChangeEvent`
-in `@fiducia/interfaces`).
+Every synced Postgres row has two deliberately different monotonic values. Its
+per-row `version` is the compare-and-swap and reconciliation key; the plane-wide
+`sync_sequence` is the commit-ordered HTTP catch-up cursor. Durable tombstones
+carry deletes through that same global cursor. The client advances a catch-up
+cursor only through the last returned sequence, but feeds each change's row
+`version`—never its `sync_sequence`—into reconciliation.
+
+All reconcile decisions use the per-row `version`, and local state transitions
+are serialized, so the two transports can deliver changes in any order and
+converge. A re-seen clean version refreshes the authoritative payload
+(idempotently) so an HTTP ack that arrived before a server-normalized echo cannot
+hide that echo. The `bump_row_version` trigger and global sequence allocation in
+`fiducia-interfaces/sql/{customer,admin}.sql` are the database source of those
+ordering guarantees. Row shapes are the generated types from
+`@fiducia/interfaces/db/*`; the
+`{table, op, id, version, row, at_ms, write_key?}` change envelope is this SDK's
+contract (it is distinct from the KV/election `ChangeEvent` in
+`@fiducia/interfaces`). `write_key` is the optional backend echo of a client's
+durable per-write identity; it does not participate in version ordering.
 
 ### Supabase requires `REPLICA IDENTITY FULL`
 
@@ -70,6 +81,7 @@ const sync = await startSync({
   backend:  {
     baseUrl: location.origin,
     getToken,                    // Authorization header for HTTP writes
+    csrfToken,                   // optional x-fiducia-csrf for cookie-auth writes
     streamAuth: "cookie",        // recommended: HttpOnly cookie for WS/SSE
   },
   supabase: { client: supabaseClient, filter: `org_id=eq.${orgId}` }, // realtime, tenant-scoped
@@ -78,15 +90,19 @@ const sync = await startSync({
 // sync.client.optimisticWrite(...), sync.send, sync.stop()
 ```
 
-Writes carry a stable `Idempotency-Key` (`table:id:op:base_version`) so retried /
-queued POSTs never double-apply, and an optional bearer token in the HTTP
-`Authorization` header. Browser WebSocket/EventSource APIs cannot attach that
-header, so streams use ambient cookie authentication by default. Passing
-`getToken` requires an explicit `streamAuth`: choose `"cookie"` (recommended,
-the token provider remains HTTP-only), or compatibility-only `"query-token"`
-when the server cannot use a cookie. Query-token mode is deliberately opt-in
-because URLs are exposed to proxies, access logs, and diagnostics; a missing or
-failing token provider opens no unauthenticated stream.
+Each new write mints a unique identity, persists it with the queue record, and
+sends it as `Idempotency-Key`. Retries reuse that identity, while two rapid edits
+made on the same base version cannot be deduplicated into one. Legacy queue rows
+without a key retain the old `table:id:op:base_version` fallback. HTTP writes may
+also carry a bearer token in `Authorization` and a same-origin `csrfToken` in
+`x-fiducia-csrf` for cookie-authenticated endpoints. Browser
+WebSocket/EventSource APIs cannot attach those headers, so streams use ambient
+cookie authentication by default. Passing `getToken` requires an explicit
+`streamAuth`: choose `"cookie"` (recommended, the token provider remains
+HTTP-only), or compatibility-only `"query-token"` when the server cannot use a
+cookie. Query-token mode is deliberately opt-in because URLs are exposed to
+proxies, access logs, and diagnostics; a missing or failing token provider opens
+no unauthenticated stream.
 
 ## Reconcile rules (implemented + tested in `src/lib.rs`)
 
@@ -94,24 +110,37 @@ failing token provider opens no unauthenticated stream.
 |---|---|---|
 | none | upsert | **Apply** |
 | none | delete | Ignore (nothing to delete) |
-| `version` ≥ incoming | any | Ignore (stale / already-applied) |
+| `version` > incoming | any | Ignore (stale) |
+| clean, same version | any | Refresh authoritative payload (idempotent) |
 | clean, older than incoming | any | **Apply** |
 | **dirty**, older than incoming | any | **Conflict** → `resolve_conflict` (default: server wins) |
 
-Echoes of our own in-flight write (same table/id/op and
-`incoming.version == queued.base_version + 1`) are matched via
-`QueuedWrite::is_echo_of`. The SDK adopts only the committed version and removes
-the durable queue entry; it does not write the already-applied optimistic
-payload through IndexedDB again. Optimistic delete echoes are recognized even
-though the local row is already absent.
+Echoes of a newly queued write require the same table/id/op and the exact
+client-minted token in `incoming.write_key`; a third-party commit at exactly
+`base_version + 1` therefore cannot impersonate our echo. Legacy queue records
+without a key still use the version heuristic for compatibility. The SDK adopts
+the committed server payload when no newer local write remains, or preserves the
+newer optimistic payload while retiring an older echo. Out-of-order exact echoes
+cannot downgrade a newer version or resurrect a row after a newer delete.
+Optimistic delete echoes are recognized even though the local row is absent.
 
 IndexedDB writes wait for the transaction's `complete` event, not merely the
-individual request's success event. When a later SDK configuration adds a
-synced table, `openStore` advances the live database version, preserves existing
-rows and `_queue`, and cooperates with upgrades from other tabs via
-`versionchange`. A blocked or incomplete migration fails visibly.
+individual request's success event. The optimistic row mutation and queue append
+commit in one transaction; exact-echo adoption, HTTP-ack settlement, and
+server-wins conflict state plus stale-queue removal do the same. A crash can
+therefore leave the old state or the new state, never a
+dirty/deleted row without its retry intent or a newly adopted server row beside
+a stale retry. When a later SDK configuration adds a synced table, `openStore`
+advances the live database version, preserves existing rows and `_queue`, and
+cooperates with upgrades from other tabs via `versionchange`. A blocked or
+incomplete migration fails visibly.
 
-`flushQueue` removes an item only after the acknowledgement metadata is durable.
+`flushQueue` removes an item in the same transaction that makes its
+acknowledgement metadata durable. A version-only ack whose queue sequence was
+already retired by a conflict cannot relabel that conflict payload; the later
+authoritative echo/catch-up row advances it. Ack ids and versions are validated
+before settlement, and a configured idempotency override may not disagree with
+the durable body key.
 Failures first persist their retry counter and then reject with a
 `QueueFlushError` containing the failed writes and successful count;
 `startSync` forwards that error as `onStatus("flush-error", error)` rather than
@@ -137,35 +166,50 @@ See `docs/repo-boundaries.md`.
   `serde_json::from_str(...).map_err(err)?`, so malformed input returns a
   `JsError` to the caller rather than panicking. Reconcile decisions are total
   over any `i64` `version`, so a hostile or stale change cannot wedge the engine.
+  JS transport decoders reject non-integer, non-finite, and unsafe-number
+  versions before they reach WASM.
 - **Stream credentials do not enter URLs by default.** HTTP bearer tokens stay
   in `Authorization`; WS/SSE uses an HttpOnly session cookie. The legacy
   `?access_token=` form is available only through explicit
   `streamAuth: "query-token"` opt-in and fails closed when no token is returned.
 - **Durable, observable retries.** IndexedDB mutations await transaction commit;
-  queue failures persist attempt counts and surface through `QueueFlushError`
-  and `startSync` status callbacks.
+  optimistic mutation+enqueue, ack/echo settlement, and conflict
+  resolution+dequeue are atomic. A per-client mutation gate serializes decisions
+  across concurrent WS/SSE/Supabase callbacks while leaving network IO outside
+  the gate. Queue
+  failures persist attempt counts and surface through `QueueFlushError` and
+  `startSync` status callbacks.
 - **No env-var config surface.** This crate exposes no environment-variable or
   CLI configuration — it is a library linked into the wasm bundle and the Rust
   backends — so there is nothing here for the `flags-2-env` launcher to wrap.
 
 ## Status
 
-- ✅ `fiducia-sync-core` — reconcile + write-queue ack rules, `cargo test` 7/7.
+- ✅ `fiducia-sync-core` — reconcile, token-aware echo rules, and total version
+  handling, covered by unit and public-API integration tests.
 - ✅ wasm-bindgen bindings (`src/wasm.rs`) — `wasm-pack build` produces `pkg/`.
 - ✅ JS shim — migration-safe IndexedDB store + durable queue, both transports, hx-optimistic
-  extension, `startSync`, catch-up hydration, idempotent/authed writes,
-  WS auto-reconnect. `node --test` 27/27.
+  extension, `startSync`, catch-up hydration, idempotent/CSRF-aware writes, and
+  WS auto-reconnect, covered by the Node SDK suite.
 
 ## Develop
 
 ```sh
-./shell cargo test          # core logic (no browser/wasm needed)
+./shell cargo test --locked          # core logic (no browser/wasm needed)
+
+# SDK tests use the real node-target WASM core.
+wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm --locked
+npm --prefix sdk test
 
 # Browser WASM package. Needs a rustup toolchain WITH the wasm32-unknown-unknown
 # target — a Homebrew-only rustc will not work (no wasm std in its sysroot). If
 # `rustc` resolves to Homebrew, put the rustup toolchain first, e.g.:
 #   PATH="$(dirname "$(rustup which rustc)"):$PATH" wasm-pack build ...
-wasm-pack build --target bundler --out-dir pkg -- --features wasm
+wasm-pack build --target bundler --out-dir pkg -- --features wasm --locked
 ```
 
 The `pkg/` output (gitignored) is the wasm module the TS shim imports.
+
+The root Dockerfile is a locked **test image**, not a network service or browser
+runtime. It copies `Cargo.lock`, resolves with `--locked`, and builds and runs as
+numeric UID/GID `65532:65532`; it exposes no port and starts no daemon.
