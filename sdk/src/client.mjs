@@ -326,5 +326,5 @@ export function makeSyncClient({ store, queue, core }) {
     return mutate(() => _hydrate(table, rows, options));
   }
 
-  return { applyChange, optimisticWrite, optimisticDelete, flushQueue, hydrate };
+  return { applyChange, optimisticWrite, optimisticPatch, optimisticDelete, flushQueue, hydrate };
 }
