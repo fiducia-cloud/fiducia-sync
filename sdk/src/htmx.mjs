@@ -47,7 +47,9 @@ export function registerOptimisticExtension(htmx, client, send) {
 
       // Instant local write + durable queue; the real request still proceeds and
       // the committed change reconciles when it echoes back over a transport.
-      void client.optimisticWrite(intent.table, intent.id, intent.row, send);
+      // A form yields a PARTIAL row (only its fields), so patch (deep-merge) it in
+      // rather than replace — otherwise unrelated fields / sibling jsonb keys drop.
+      void client.optimisticPatch(intent.table, intent.id, intent.row, send);
       return true;
     },
   });
