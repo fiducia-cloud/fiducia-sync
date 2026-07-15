@@ -210,6 +210,16 @@ export function makeSyncClient({ store, queue, core }) {
   }
 
   /**
+   * Optimistic PARTIAL update: deep-merge `patch` into the row already held (so a
+   * single changed field or one key of a nested jsonb object keeps its siblings),
+   * while sending only the partial `patch` to the backend to COALESCE. This is the
+   * right entry point for form/single-field edits (e.g. the htmx extension).
+   */
+  function optimisticPatch(table, id, patch, send, op = "upsert") {
+    return optimisticWrite(table, id, patch, send, op, true);
+  }
+
+  /**
    * Re-send everything still queued (call on reconnect).
    *
    * Successful writes are removed only after their ack is applied durably.
