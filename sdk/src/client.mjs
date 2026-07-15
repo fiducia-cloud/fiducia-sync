@@ -6,6 +6,8 @@
 // Isolation: one client per plane; the caller passes a store bound to that
 // plane's IndexedDB database. Planes never share.
 
+import { deepMerge } from "./merge.mjs";
+
 /**
  * @param {object} deps
  * @param {object} deps.store  from openStore()
