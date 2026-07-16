@@ -151,7 +151,7 @@ apply, hydrate, and flush errors are reported to `console.error`.
 
 Sync runs **per plane** — the customer client syncs the customer DB, the admin
 client syncs the admin DB; same code, separate instances, data never crosses.
-See `docs/repo-boundaries.md`.
+See `docs/README.md`.
 
 ## Security & hardening
 
