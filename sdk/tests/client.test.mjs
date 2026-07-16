@@ -130,6 +130,57 @@ test("flushQueue persists failures and rejects with actionable details", async (
   assert.equal((await queue.list())[0].attempts, 1);
 });
 
+test("a partial flush retires only the acked write; failures stay queued with accumulating durable attempts", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  await store.put("api_keys", "k-ok", { name: "ok" }, { version: 1, dirty: true });
+  await store.put("api_keys", "k-bad", { name: "bad" }, { version: 1, dirty: true });
+  await queue.enqueue({ id: "k-ok", table: "api_keys", op: "upsert", payload: { name: "ok" }, base_version: 1 });
+  await queue.enqueue({ id: "k-bad", table: "api_keys", op: "upsert", payload: { name: "bad" }, base_version: 1 });
+
+  const reported = [];
+  const send = async (w) => {
+    if (w.id === "k-bad") throw new Error("offline");
+    return { id: w.id, committed_version: 2 };
+  };
+
+  await assert.rejects(
+    () => client.flushQueue(send, { onError: (error, w, attempts) => reported.push({ id: w.id, attempts, error: String(error) }) }),
+    (error) => {
+      assert.equal(error.name, "QueueFlushError");
+      assert.equal(error.flushed, 1); // the acked write still counts
+      assert.equal(error.failures.length, 1);
+      assert.equal(error.failures[0].write.id, "k-bad");
+      assert.equal(error.failures[0].attempts, 1);
+      return true;
+    },
+  );
+  assert.deepEqual(reported, [{ id: "k-bad", attempts: 1, error: "Error: offline" }]);
+
+  // The acked write is retired and its row adopted clean...
+  assert.deepEqual(await store.meta("api_keys", "k-ok"), { version: 2, dirty: false });
+  // ...while the failed write survives durably, still dirty, for the next flush.
+  const remaining = await queue.list();
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].id, "k-bad");
+  assert.equal(remaining[0].attempts, 1);
+  assert.deepEqual(await store.meta("api_keys", "k-bad"), { version: 1, dirty: true });
+
+  // A second failed flush accumulates the durable retry counter (it must not
+  // reset), so a poison write is detectable across reconnects/reloads.
+  await assert.rejects(
+    () => client.flushQueue(async () => { throw new Error("still offline"); }),
+    (error) => error.name === "QueueFlushError" && error.failures[0].attempts === 2,
+  );
+  assert.equal((await queue.list())[0].attempts, 2);
+
+  // Once the network heals, the same queued write flushes cleanly.
+  assert.equal(await client.flushQueue(async (w) => ({ id: w.id, committed_version: 5 })), 1);
+  assert.equal((await queue.list()).length, 0);
+  assert.deepEqual(await store.meta("api_keys", "k-bad"), { version: 5, dirty: false });
+});
+
 test("a genuine conflict (someone else's newer change) resolves server-wins and drops the stale queued write", async (t) => {
   const { store, queue, client } = await setup();
   t.after(() => store.close());

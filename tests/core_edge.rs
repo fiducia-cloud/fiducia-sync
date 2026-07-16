@@ -5,8 +5,8 @@
 //! the shape the TS shim (`sdk/src/core.mjs`) parses.
 
 use fiducia_sync_core::{
-    on_ack, reconcile, AckOutcome, ChangeEvent, ChangeOp, IgnoreReason, LocalRow, QueuedWrite,
-    Reconcile, WriteAck,
+    on_ack, reconcile, resolve_conflict, AckOutcome, ChangeEvent, ChangeOp, ConflictPolicy,
+    IgnoreReason, LocalRow, QueuedWrite, Reconcile, Resolution, WriteAck,
 };
 
 fn ev(op: ChangeOp, version: i64) -> ChangeEvent {
@@ -52,6 +52,57 @@ fn reconcile_is_total_and_monotone_over_i64_extremes() {
                         assert_eq!(decision, Reconcile::Apply, "newer over clean = apply");
                     }
                 }
+            }
+        }
+    }
+}
+
+/// One full reconcile step under the default server-wins policy: take the
+/// decision and apply it to the local row, exactly as the SDK does.
+fn reconcile_step(local: Option<LocalRow>, event: &ChangeEvent) -> Option<LocalRow> {
+    let adopt_server = || match event.op {
+        ChangeOp::Upsert => Some(LocalRow {
+            version: event.version,
+            dirty: false,
+        }),
+        ChangeOp::Delete => None,
+    };
+    match reconcile(local, event) {
+        Reconcile::Apply => adopt_server(),
+        Reconcile::Ignore(_) => local,
+        Reconcile::Conflict => match resolve_conflict(ConflictPolicy::ServerWins) {
+            Resolution::ApplyServer => adopt_server(),
+            Resolution::KeepLocal => local,
+        },
+    }
+}
+
+#[test]
+fn reconcile_step_is_idempotent_over_adversarial_version_pairs() {
+    // Delivering the same change twice (redelivery, reconnect replay) must be
+    // a no-op the second time: step(step(s, e), e) == step(s, e), and once a
+    // step has run, the SAME event may never provoke another Apply/Conflict.
+    let mut locals: Vec<Option<LocalRow>> = vec![None];
+    for &version in &EXTREMES {
+        for dirty in [false, true] {
+            locals.push(Some(LocalRow { version, dirty }));
+        }
+    }
+    for &local in &locals {
+        for &incoming in &EXTREMES {
+            for op in [ChangeOp::Upsert, ChangeOp::Delete] {
+                let event = ev(op, incoming);
+                let once = reconcile_step(local, &event);
+                let twice = reconcile_step(once, &event);
+                assert_eq!(
+                    twice, once,
+                    "step not idempotent for local={local:?} event={event:?}"
+                );
+                assert!(
+                    matches!(reconcile(once, &event), Reconcile::Ignore(_)),
+                    "redelivered event must be ignored after the step: \
+                     local={local:?} event={event:?} -> {once:?}"
+                );
             }
         }
     }
