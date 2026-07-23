@@ -20,9 +20,18 @@
 //   });
 
 export { openStore, makeQueue, promisify } from "./store.mjs";
+export {
+  openBrowserStore,
+  openLocalStorageStore,
+} from "./local-storage.mjs";
 export { deepMerge } from "./merge.mjs";
 export { wrapCore, loadBrowserCore } from "./core.mjs";
-export { makeSyncClient } from "./client.mjs";
+export {
+  DEFAULT_WRITE_POLICY,
+  SyncWriteError,
+  makeSyncClient,
+} from "./client.mjs";
+export { makeOpenTelemetryTelemetry } from "./telemetry.mjs";
 export { startSync } from "./start.mjs";
 export { connectBackend, backendSend, makeBackendSend } from "./transports/backend.mjs";
 export { subscribeSupabase } from "./transports/supabase.mjs";

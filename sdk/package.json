@@ -4,7 +4,7 @@
   "type": "module",
   "types": "./src/index.d.ts",
   "sideEffects": false,
-  "description": "Local-first sync SDK for fiducia.cloud — an optimistic IndexedDB store reconciled with Postgres over Supabase realtime + the backend WS, powered by the fiducia-sync-core WASM.",
+  "description": "Policy-driven local-first sync for fiducia.cloud over IndexedDB/localStorage and Postgres/Supabase, powered by fiducia-sync-core WASM.",
   "license": "MIT",
   "repository": {
     "type": "git",

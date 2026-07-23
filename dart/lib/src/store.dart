@@ -36,11 +36,20 @@ abstract interface class SyncStore {
 
   Future<void> delete(String table, String id);
 
+  Future<int> enqueue(QueuedWrite write);
+
   Future<int> enqueueOptimistic(QueuedWrite write, JsonMap? row);
 
   Future<List<QueuedWrite>> queuedWrites();
 
   Future<AckSettlement> settleAcknowledgement(
+    String table,
+    String id,
+    int sequence,
+    int committedVersion,
+  );
+
+  Future<AckSettlement> settlePessimistic(
     String table,
     String id,
     int sequence,

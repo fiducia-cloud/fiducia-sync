@@ -20,3 +20,7 @@ adapter, the TypeScript browser SDK, and the Dart/Flutter package.
 
 See [JSONB merge semantics](jsonb-merge.md) for the partial-update behavior and
 its concurrency boundary.
+
+See [write policies, timestamps, and replication authority](write-policies-and-replication.md)
+for enum write behavior, OpenTelemetry, Supabase authority, causal multi-primary
+requirements, and cross-language schema boundaries.

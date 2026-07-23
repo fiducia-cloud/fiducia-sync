@@ -23,10 +23,10 @@ final class SqliteSyncStore implements SyncStore {
     final database = await resolvedFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: 2,
         onConfigure: (database) => database.execute('pragma foreign_keys = on'),
         onCreate: _createSchema,
-        onUpgrade: (database, _, _) => _createSchema(database, 1),
+        onUpgrade: _upgradeSchema,
       ),
     );
     return SqliteSyncStore._(database);
@@ -41,6 +41,9 @@ final class SqliteSyncStore implements SyncStore {
           row_json text not null,
           version integer not null,
           dirty integer not null check (dirty in (0, 1)),
+          created_at_ms integer not null,
+          updated_at_ms integer not null,
+          synced_at_ms integer,
           primary key (table_name, row_id)
         )
       ''')
@@ -54,7 +57,10 @@ final class SqliteSyncStore implements SyncStore {
           base_version integer not null,
           write_key text,
           attempts integer not null default 0,
-          superseded_version integer
+          superseded_version integer,
+          write_strategy text not null default 'optimistic',
+          failure_mode text not null default 'return_result',
+          telemetry_level text not null default 'errors'
         )
       ''')
       ..execute('''
@@ -73,6 +79,44 @@ final class SqliteSyncStore implements SyncStore {
         )
       ''');
     await batch.commit(noResult: true);
+  }
+
+  static Future<void> _upgradeSchema(
+    Database database,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    await _createSchema(database, newVersion);
+    if (oldVersion < 2) {
+      final batch = database.batch()
+        ..execute(
+          'alter table $_rowsTable add column created_at_ms integer not null default 0',
+        )
+        ..execute(
+          'alter table $_rowsTable add column updated_at_ms integer not null default 0',
+        )
+        ..execute('alter table $_rowsTable add column synced_at_ms integer')
+        ..execute(
+          "alter table $_queueTable add column write_strategy text not null default 'optimistic'",
+        )
+        ..execute(
+          "alter table $_queueTable add column failure_mode text not null default 'return_result'",
+        )
+        ..execute(
+          "alter table $_queueTable add column telemetry_level text not null default 'errors'",
+        )
+        ..execute('''
+          update $_rowsTable
+          set created_at_ms = cast(strftime('%s', 'now') as integer) * 1000,
+              updated_at_ms = cast(strftime('%s', 'now') as integer) * 1000,
+              synced_at_ms = case
+                when dirty = 0 then cast(strftime('%s', 'now') as integer) * 1000
+                else null
+              end
+          where created_at_ms = 0
+        ''');
+      await batch.commit(noResult: true);
+    }
   }
 
   @override
@@ -115,6 +159,10 @@ final class SqliteSyncStore implements SyncStore {
       whereArgs: [table, id],
     );
   }
+
+  @override
+  Future<int> enqueue(QueuedWrite write) =>
+      _database.insert(_queueTable, _writeRecord(write));
 
   @override
   Future<int> enqueueOptimistic(QueuedWrite write, JsonMap? row) {
@@ -205,8 +253,105 @@ final class SqliteSyncStore implements SyncStore {
           LocalRowMetadata(
             version: adoptedVersion,
             dirty: rowWrites.any((candidate) => candidate.sequence != sequence),
+            syncedAtMs: DateTime.now().millisecondsSinceEpoch,
           ),
         );
+      }
+      await transaction.delete(
+        _queueTable,
+        where: 'seq = ?',
+        whereArgs: [sequence],
+      );
+      return outcome;
+    });
+  }
+
+  @override
+  Future<AckSettlement> settlePessimistic(
+    String table,
+    String id,
+    int sequence,
+    int committedVersion,
+  ) {
+    return _database.transaction((transaction) async {
+      final selected = await transaction.query(
+        _queueTable,
+        where: 'seq = ?',
+        whereArgs: [sequence],
+        limit: 1,
+      );
+      if (selected.isEmpty) return AckSettlement.missing;
+      final acknowledged = _queuedWrite(selected.single);
+      if (acknowledged.table != table || acknowledged.id != id) {
+        throw StateError(
+          'queued write identity changed before acknowledgement',
+        );
+      }
+
+      final otherWrites = (await transaction.query(
+        _queueTable,
+        where: 'table_name = ? and row_id = ? and seq <> ?',
+        whereArgs: [table, id, sequence],
+      )).map(_queuedWrite).toList(growable: false);
+      for (final candidate in otherWrites) {
+        final candidateSequence = candidate.sequence;
+        if (candidateSequence != null && candidateSequence < sequence) {
+          await transaction.update(
+            _queueTable,
+            {
+              'superseded_version': math.max(
+                candidate.supersededVersion ?? -0x8000000000000000,
+                committedVersion,
+              ),
+            },
+            where: 'seq = ?',
+            whereArgs: [candidateSequence],
+          );
+        }
+      }
+
+      final stored = await _read(transaction, table, id);
+      final hasNewerOptimisticValue =
+          stored?.metadata.dirty == true &&
+          otherWrites.any(
+            (candidate) =>
+                (candidate.sequence ?? -1) > sequence &&
+                candidate.writePolicy.strategy != SyncWriteStrategy.pessimistic,
+          );
+      AckSettlement outcome;
+      if (hasNewerOptimisticValue && stored != null) {
+        await _put(
+          transaction,
+          table,
+          id,
+          stored.row,
+          LocalRowMetadata(
+            version: math.max(stored.metadata.version, committedVersion),
+            dirty: true,
+            syncedAtMs: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+        outcome = AckSettlement.superseded;
+      } else if (acknowledged.operation == ChangeOperation.delete) {
+        await transaction.delete(
+          _rowsTable,
+          where: 'table_name = ? and row_id = ?',
+          whereArgs: [table, id],
+        );
+        outcome = AckSettlement.adopted(committedVersion);
+      } else {
+        await _put(
+          transaction,
+          table,
+          id,
+          _requiredPayload(acknowledged),
+          LocalRowMetadata(
+            version: committedVersion,
+            dirty: otherWrites.isNotEmpty,
+            syncedAtMs: DateTime.now().millisecondsSinceEpoch,
+          ),
+        );
+        outcome = AckSettlement.adopted(committedVersion);
       }
       await transaction.delete(
         _queueTable,
@@ -256,6 +401,7 @@ final class SqliteSyncStore implements SyncStore {
             LocalRowMetadata(
               version: stored.metadata.version,
               dirty: remaining.isNotEmpty,
+              syncedAtMs: DateTime.now().millisecondsSinceEpoch,
             ),
           );
         }
@@ -271,6 +417,7 @@ final class SqliteSyncStore implements SyncStore {
             LocalRowMetadata(
               version: stored.metadata.version,
               dirty: remaining.isNotEmpty,
+              syncedAtMs: DateTime.now().millisecondsSinceEpoch,
             ),
           );
         }
@@ -283,6 +430,7 @@ final class SqliteSyncStore implements SyncStore {
           LocalRowMetadata(
             version: math.max(stored.metadata.version, event.version),
             dirty: true,
+            syncedAtMs: DateTime.now().millisecondsSinceEpoch,
           ),
         );
       }
@@ -333,6 +481,7 @@ final class SqliteSyncStore implements SyncStore {
           LocalRowMetadata(
             version: math.max(stored.metadata.version, event.version),
             dirty: true,
+            syncedAtMs: DateTime.now().millisecondsSinceEpoch,
           ),
         );
       }
@@ -424,12 +573,30 @@ Future<void> _put(
   JsonMap row,
   LocalRowMetadata metadata,
 ) async {
+  final existing = await database.query(
+    _rowsTable,
+    columns: ['created_at_ms', 'synced_at_ms'],
+    where: 'table_name = ? and row_id = ?',
+    whereArgs: [table, id],
+    limit: 1,
+  );
+  final now = DateTime.now().millisecondsSinceEpoch;
+  final existingCreated = existing.isEmpty
+      ? null
+      : existing.single['created_at_ms'] as int?;
+  final existingSynced = existing.isEmpty
+      ? null
+      : existing.single['synced_at_ms'] as int?;
   await database.insert(_rowsTable, {
     'table_name': table,
     'row_id': id,
     'row_json': jsonEncode(row),
     'version': metadata.version,
     'dirty': metadata.dirty ? 1 : 0,
+    'created_at_ms': metadata.createdAtMs ?? existingCreated ?? now,
+    'updated_at_ms': metadata.updatedAtMs ?? now,
+    'synced_at_ms':
+        metadata.syncedAtMs ?? (metadata.dirty ? existingSynced : now),
   }, conflictAlgorithm: ConflictAlgorithm.replace);
 }
 
@@ -451,7 +618,11 @@ Future<void> _applyServer(
       event.id,
       event.row ??
           (throw const FormatException('upsert change must carry a row')),
-      LocalRowMetadata(version: event.version, dirty: dirty),
+      LocalRowMetadata(
+        version: event.version,
+        dirty: dirty,
+        syncedAtMs: DateTime.now().millisecondsSinceEpoch,
+      ),
     );
   }
 }
@@ -462,6 +633,9 @@ StoredRow _storedRow(Map<String, Object?> record) {
     metadata: LocalRowMetadata(
       version: _integer(record['version'], 'version'),
       dirty: _integer(record['dirty'], 'dirty') == 1,
+      createdAtMs: _nullableInteger(record['created_at_ms'], 'created_at_ms'),
+      updatedAtMs: _nullableInteger(record['updated_at_ms'], 'updated_at_ms'),
+      syncedAtMs: _nullableInteger(record['synced_at_ms'], 'synced_at_ms'),
     ),
   );
 }
@@ -482,6 +656,17 @@ QueuedWrite _queuedWrite(Map<String, Object?> record) {
     supersededVersion: record['superseded_version'] == null
         ? null
         : _integer(record['superseded_version'], 'superseded_version'),
+    writePolicy: SyncWritePolicy(
+      strategy: SyncWriteStrategy.fromWire(
+        record['write_strategy'] ?? 'optimistic',
+      ),
+      failureMode: SyncFailureMode.fromWire(
+        record['failure_mode'] ?? 'return_result',
+      ),
+      telemetry: SyncTelemetryLevel.fromWire(
+        record['telemetry_level'] ?? 'errors',
+      ),
+    ),
   );
 }
 
@@ -494,6 +679,9 @@ Map<String, Object?> _writeRecord(QueuedWrite write) => {
   'write_key': write.key,
   'attempts': write.attempts,
   'superseded_version': write.supersededVersion,
+  'write_strategy': write.writePolicy.strategy.wireName,
+  'failure_mode': write.writePolicy.failureMode.wireName,
+  'telemetry_level': write.writePolicy.telemetry.name,
 };
 
 JsonMap _requiredPayload(QueuedWrite write) {
@@ -512,6 +700,9 @@ int _integer(Object? value, String field) {
   if (value is! int) throw FormatException('$field must be an integer');
   return value;
 }
+
+int? _nullableInteger(Object? value, String field) =>
+    value == null ? null : _integer(value, field);
 
 String _string(Object? value, String field) {
   if (value is! String) throw FormatException('$field must be a string');

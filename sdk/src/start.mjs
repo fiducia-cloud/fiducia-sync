@@ -8,7 +8,8 @@
 // hydration (fetch authoritative rows over HTTP and reconcile them) so anything
 // missed while offline lands, and we flush the durable write-queue.
 
-import { openStore, makeQueue } from "./store.mjs";
+import { makeQueue } from "./store.mjs";
+import { openBrowserStore } from "./local-storage.mjs";
 import { loadBrowserCore } from "./core.mjs";
 import { makeSyncClient } from "./client.mjs";
 import { connectBackend, makeBackendSend } from "./transports/backend.mjs";
@@ -44,11 +45,28 @@ export async function startSync({
   hydratePrune = true,
   cursorScope = "global",
   pullPageSize = 500,
+  writePolicy,
+  resolveWritePolicy,
+  telemetry,
+  persistence = "indexeddb",
+  localStorage,
+  onPersistenceFallback,
 }) {
   const resolvedCore = core ?? (await loadBrowserCore());
-  const store = await openStore(dbName, tables);
+  const store = await openBrowserStore(dbName, tables, {
+    persistence,
+    storage: localStorage,
+    onFallback: onPersistenceFallback,
+  });
   const queue = makeQueue(store);
-  const client = makeSyncClient({ store, queue, core: resolvedCore });
+  const client = makeSyncClient({
+    store,
+    queue,
+    core: resolvedCore,
+    writePolicy,
+    resolveWritePolicy,
+    telemetry,
+  });
   const stops = [];
 
   const report = (status, error) => {

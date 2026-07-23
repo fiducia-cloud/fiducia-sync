@@ -4,17 +4,96 @@ import 'dart:math';
 import 'core.dart';
 import 'models.dart';
 import 'store.dart';
+import 'telemetry.dart';
 
 typedef SendWrite = Future<WriteAcknowledgement> Function(QueuedWrite write);
 typedef PullChanges = Future<PullPage> Function(int cursor, int limit);
+typedef ResolveWritePolicy = SyncWritePolicy Function(SyncWriteContext context);
 
 final class FiduciaSyncClient {
-  FiduciaSyncClient({required this.store, String Function()? writeKeyFactory})
-    : _writeKeyFactory = writeKeyFactory ?? _secureWriteKey;
+  FiduciaSyncClient({
+    required this.store,
+    String Function()? writeKeyFactory,
+    this.writePolicy = SyncWritePolicy.standard,
+    this.resolveWritePolicy,
+    this.telemetry,
+  }) : _writeKeyFactory = writeKeyFactory ?? _secureWriteKey;
 
   final SyncStore store;
   final String Function() _writeKeyFactory;
+  final SyncWritePolicy writePolicy;
+  final ResolveWritePolicy? resolveWritePolicy;
+  final SyncTelemetry? telemetry;
   Future<void> _mutationTail = Future<void>.value();
+
+  SyncWritePolicy _policyFor(
+    SyncWriteContext context, [
+    SyncWritePolicy? override,
+  ]) => override ?? resolveWritePolicy?.call(context) ?? writePolicy;
+
+  bool _shouldEmit(SyncTelemetryLevel level, SyncTelemetryPhase phase) {
+    if (level == SyncTelemetryLevel.off) return false;
+    if (level == SyncTelemetryLevel.errors) {
+      return phase == SyncTelemetryPhase.failed ||
+          phase == SyncTelemetryPhase.retryScheduled;
+    }
+    return true;
+  }
+
+  SyncTelemetryContext _telemetryContext(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+  ) => SyncTelemetryContext(
+    table: context.table,
+    operation: context.operation,
+    strategy: policy.strategy,
+  );
+
+  SyncTelemetrySpan? _beginTelemetry(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+  ) {
+    if (policy.telemetry != SyncTelemetryLevel.lifecycle &&
+        policy.telemetry != SyncTelemetryLevel.verbose) {
+      return null;
+    }
+    try {
+      return telemetry?.startWrite(_telemetryContext(context, policy));
+    } on Object {
+      return null;
+    }
+  }
+
+  void _reportTelemetry(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+    SyncTelemetryPhase phase, {
+    int? attempts,
+    String? errorType,
+    SyncTelemetrySpan? span,
+  }) {
+    if (!_shouldEmit(policy.telemetry, phase)) return;
+    final event = SyncTelemetryEvent(
+      phase: phase,
+      strategy: policy.strategy,
+      table: context.table,
+      operation: context.operation,
+      atMs: DateTime.now().millisecondsSinceEpoch,
+      attempts: attempts,
+      errorType: errorType,
+    );
+    try {
+      telemetry?.emit(event, _telemetryContext(context, policy));
+      final attributes = <String, Object>{};
+      if (attempts != null) {
+        attributes['fiducia.sync.attempts'] = attempts;
+      }
+      if (errorType != null) attributes['error.type'] = errorType;
+      span?.event(phase, attributes);
+    } on Object {
+      // Telemetry must never affect durable write behavior.
+    }
+  }
 
   Future<T> _mutate<T>(Future<T> Function() operation) {
     final result = Completer<T>();
@@ -79,6 +158,21 @@ final class FiduciaSyncClient {
               .whereType<int>()
               .toList(growable: false),
         );
+        final context = SyncWriteContext(
+          table: event.table,
+          operation: event.operation,
+          mutation: SyncMutationMode.replace,
+        );
+        try {
+          final policy = _policyFor(context);
+          _reportTelemetry(
+            context,
+            policy,
+            SyncTelemetryPhase.conflictResolved,
+          );
+        } on Object {
+          // A telemetry-policy resolver cannot undo a durable conflict.
+        }
         return 'conflict-resolved';
       case ReconcileKind.ignore:
         if (decision.ignoreReason == IgnoreReason.alreadyApplied &&
@@ -108,22 +202,34 @@ final class FiduciaSyncClient {
     }
   }
 
-  Future<OptimisticWriteResult> optimisticWrite({
+  Future<OptimisticWriteResult> write({
     required String table,
     required String id,
     required JsonMap? row,
-    required SendWrite send,
+    SendWrite? send,
     ChangeOperation operation = ChangeOperation.upsert,
-    bool merge = false,
+    SyncMutationMode mutation = SyncMutationMode.replace,
+    SyncWritePolicy? policy,
   }) async {
+    final context = SyncWriteContext(
+      table: table,
+      operation: operation,
+      mutation: mutation,
+    );
+    final resolvedPolicy = _policyFor(context, policy);
+    if (resolvedPolicy.strategy != SyncWriteStrategy.localQueue &&
+        send == null) {
+      throw ArgumentError(
+        '${resolvedPolicy.strategy.wireName} writes require a send callback',
+      );
+    }
+    final span = _beginTelemetry(context, resolvedPolicy);
     final queued = await _mutate(() async {
       final local = await store.read(table, id);
       final payload = switch (operation) {
         ChangeOperation.delete => null,
-        ChangeOperation.upsert when merge => deepMerge(
-          local?.row ?? const <String, Object?>{},
-          row ?? const {},
-        ),
+        ChangeOperation.upsert when mutation == SyncMutationMode.merge =>
+          deepMerge(local?.row ?? const <String, Object?>{}, row ?? const {}),
         ChangeOperation.upsert =>
           row ??
               (throw const FormatException(
@@ -137,31 +243,130 @@ final class FiduciaSyncClient {
         payload: payload,
         baseVersion: local?.metadata.version ?? 0,
         key: _writeKeyFactory(),
+        writePolicy: resolvedPolicy,
       );
-      final sequence = await store.enqueueOptimistic(write, payload);
+      final sequence = resolvedPolicy.strategy == SyncWriteStrategy.pessimistic
+          ? await store.enqueue(write)
+          : await store.enqueueOptimistic(write, payload);
       return write.copyWith(sequence: sequence);
     });
+    _reportTelemetry(
+      context,
+      resolvedPolicy,
+      SyncTelemetryPhase.localQueued,
+      span: span,
+    );
 
+    if (resolvedPolicy.strategy == SyncWriteStrategy.localQueue) {
+      span?.end();
+      return OptimisticWriteResult.queued(attempts: 0);
+    }
     try {
-      final acknowledgement = await send(queued);
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.sendStarted,
+        span: span,
+      );
+      final acknowledgement = await send!(queued);
       _validateAcknowledgement(queued, acknowledgement);
       final settlement = await _mutate(
-        () => store.settleAcknowledgement(
-          table,
-          id,
-          queued.sequence!,
-          acknowledgement.committedVersion,
-        ),
+        () => resolvedPolicy.strategy == SyncWriteStrategy.pessimistic
+            ? store.settlePessimistic(
+                table,
+                id,
+                queued.sequence!,
+                acknowledgement.committedVersion,
+              )
+            : store.settleAcknowledgement(
+                table,
+                id,
+                queued.sequence!,
+                acknowledgement.committedVersion,
+              ),
       );
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.acknowledged,
+        span: span,
+      );
+      span?.end();
       return OptimisticWriteResult.acknowledged(settlement.version);
     } on Object catch (error) {
       final attempts = await _mutate(
         () => store.bumpAttempts(queued.sequence!),
       );
-      return attempts == 0
-          ? OptimisticWriteResult.acknowledged()
-          : OptimisticWriteResult.queued(attempts: attempts, error: error);
+      if (attempts == 0) {
+        _reportTelemetry(
+          context,
+          resolvedPolicy,
+          SyncTelemetryPhase.acknowledged,
+          span: span,
+        );
+        span?.end();
+        return OptimisticWriteResult.acknowledged();
+      }
+      final result = OptimisticWriteResult.queued(
+        attempts: attempts,
+        error: resolvedPolicy.failureMode == SyncFailureMode.emitOnly
+            ? null
+            : error,
+      );
+      final errorType = error.runtimeType.toString();
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.failed,
+        attempts: attempts,
+        errorType: errorType,
+        span: span,
+      );
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.retryScheduled,
+        attempts: attempts,
+        errorType: errorType,
+        span: span,
+      );
+      try {
+        span?.error(errorType);
+        span?.end();
+      } on Object {
+        // Observability is best-effort.
+      }
+      if (resolvedPolicy.failureMode == SyncFailureMode.throwError) {
+        throw SyncWriteException(cause: error, result: result, write: queued);
+      }
+      return result;
     }
+  }
+
+  Future<OptimisticWriteResult> optimisticWrite({
+    required String table,
+    required String id,
+    required JsonMap? row,
+    required SendWrite send,
+    ChangeOperation operation = ChangeOperation.upsert,
+    bool merge = false,
+  }) {
+    final context = SyncWriteContext(
+      table: table,
+      operation: operation,
+      mutation: merge ? SyncMutationMode.merge : SyncMutationMode.replace,
+    );
+    return write(
+      table: table,
+      id: id,
+      row: row,
+      send: send,
+      operation: operation,
+      mutation: context.mutation,
+      policy: _policyFor(
+        context,
+      ).copyWith(strategy: SyncWriteStrategy.optimistic),
+    );
   }
 
   Future<OptimisticWriteResult> optimisticDelete({
@@ -204,12 +409,19 @@ final class FiduciaSyncClient {
         final acknowledgement = await send(write);
         _validateAcknowledgement(write, acknowledgement);
         await _mutate(
-          () => store.settleAcknowledgement(
-            write.table,
-            write.id,
-            sequence,
-            acknowledgement.committedVersion,
-          ),
+          () => write.writePolicy.strategy == SyncWriteStrategy.pessimistic
+              ? store.settlePessimistic(
+                  write.table,
+                  write.id,
+                  sequence,
+                  acknowledgement.committedVersion,
+                )
+              : store.settleAcknowledgement(
+                  write.table,
+                  write.id,
+                  sequence,
+                  acknowledgement.committedVersion,
+                ),
         );
         flushed += 1;
       } on Object catch (error) {

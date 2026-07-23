@@ -8,6 +8,57 @@
 
 import { deepMerge } from "./merge.mjs";
 
+const WRITE_STRATEGIES = new Set([
+  "local_queue",
+  "optimistic",
+  "pessimistic",
+]);
+const FAILURE_MODES = new Set(["return_result", "throw_error", "emit_only"]);
+const TELEMETRY_LEVELS = new Set(["off", "errors", "lifecycle", "verbose"]);
+
+export const DEFAULT_WRITE_POLICY = Object.freeze({
+  strategy: "optimistic",
+  failure_mode: "return_result",
+  telemetry: "errors",
+});
+
+export class SyncWriteError extends Error {
+  constructor(message, { cause, result, write } = {}) {
+    super(message, { cause });
+    this.name = "SyncWriteError";
+    this.result = result;
+    this.write = write;
+  }
+}
+
+function validateWritePolicy(policy) {
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    throw new TypeError("sync write policy must be an object of enum values");
+  }
+  if (!WRITE_STRATEGIES.has(policy.strategy)) {
+    throw new TypeError(`unsupported sync write strategy: ${policy.strategy}`);
+  }
+  if (!FAILURE_MODES.has(policy.failure_mode)) {
+    throw new TypeError(
+      `unsupported sync write failure mode: ${policy.failure_mode}`,
+    );
+  }
+  if (!TELEMETRY_LEVELS.has(policy.telemetry)) {
+    throw new TypeError(
+      `unsupported sync write telemetry level: ${policy.telemetry}`,
+    );
+  }
+  return Object.freeze({
+    strategy: policy.strategy,
+    failure_mode: policy.failure_mode,
+    telemetry: policy.telemetry,
+  });
+}
+
+function errorType(error) {
+  return error instanceof Error && error.name ? error.name : typeof error;
+}
+
 /**
  * @param {object} deps
  * @param {object} deps.store  from openStore()
@@ -40,7 +91,78 @@ function validateAck(write, ack) {
   return ack;
 }
 
-export function makeSyncClient({ store, queue, core }) {
+export function makeSyncClient({
+  store,
+  queue,
+  core,
+  writePolicy = DEFAULT_WRITE_POLICY,
+  resolveWritePolicy,
+  telemetry,
+}) {
+  const defaultPolicy = validateWritePolicy(writePolicy);
+
+  function policyFor(context, override) {
+    return validateWritePolicy(
+      override ?? resolveWritePolicy?.(context) ?? defaultPolicy,
+    );
+  }
+
+  function shouldEmit(level, phase) {
+    if (level === "off") return false;
+    if (level === "errors") {
+      return phase === "failed" || phase === "retry_scheduled";
+    }
+    return true;
+  }
+
+  function telemetryContext(context, policy) {
+    return {
+      table: context.table,
+      op: context.op,
+      strategy: policy.strategy,
+      storage: store.storageKind ?? "indexeddb",
+    };
+  }
+
+  function beginTelemetry(context, policy) {
+    if (
+      policy.telemetry !== "lifecycle" &&
+      policy.telemetry !== "verbose"
+    ) {
+      return undefined;
+    }
+    try {
+      return telemetry?.startWrite?.(telemetryContext(context, policy));
+    } catch {
+      return undefined;
+    }
+  }
+
+  function reportTelemetry(context, policy, phase, extra = {}, span) {
+    if (!shouldEmit(policy.telemetry, phase)) return;
+    const event = {
+      phase,
+      strategy: policy.strategy,
+      table: context.table,
+      op: context.op,
+      at_ms: Date.now(),
+      ...extra,
+    };
+    try {
+      telemetry?.emit?.(event, telemetryContext(context, policy));
+      span?.event?.(phase, {
+        ...(extra.attempts === undefined
+          ? {}
+          : { "fiducia.sync.attempts": extra.attempts }),
+        ...(extra.error_type === undefined
+          ? {}
+          : { "error.type": extra.error_type }),
+      });
+    } catch {
+      // Observability must never change write durability or application flow.
+    }
+  }
+
   // Reconcile decisions span multiple IndexedDB reads/writes. Serialize those
   // local state transitions so two transport callbacks cannot both decide from
   // the same old version and land out of order. Network sends deliberately stay
@@ -115,6 +237,13 @@ export function makeSyncClient({ store, queue, core }) {
       // retry an old write after the newer server state has landed locally.
       const staleSeqs = rowWrites.map((w) => w.seq);
       await queue.resolveConflict(event, staleSeqs);
+      const context = { table: event.table, op: event.op, mutation: "replace" };
+      try {
+        const policy = policyFor(context);
+        reportTelemetry(context, policy, "conflict_resolved");
+      } catch {
+        // A telemetry-policy resolver cannot undo an already-durable conflict.
+      }
       return "conflict-resolved";
     }
 
@@ -143,54 +272,83 @@ export function makeSyncClient({ store, queue, core }) {
   // callers can report the adopted version. `Superseded` means a newer change
   // already landed locally (via applyChange, which already cleared dirty), so we
   // leave local untouched; either way the queued write is done and dequeued.
-  async function _applyAck(table, id, ack, settledSeq) {
-    return queue.settleAck(table, id, settledSeq, ack.committed_version);
+  async function _applyAck(table, id, ack, settledSeq, strategy = "optimistic") {
+    return strategy === "pessimistic"
+      ? queue.settlePessimistic(
+          table,
+          id,
+          settledSeq,
+          ack.committed_version,
+        )
+      : queue.settleAck(table, id, settledSeq, ack.committed_version);
   }
 
   /**
-   * Optimistic write: update IndexedDB instantly (dirty), enqueue durably, then
-   * send to the backend. On ack, adopt the committed version and clear dirty; on
-   * failure, stay queued + dirty for retry (offline-capable).
+   * Policy-driven write. Every strategy first persists a durable resend intent.
    *
-   * `op:"delete"` optimistically removes the row locally and queues a delete; the
-   * row reappears only if the send fails and a later reconcile re-adds it.
-   *
-   * With `merge:true` (see optimisticPatch) the local row is `deepMerge(existing,
-   * row)` — the PARTIAL patch is folded into what's stored so sibling fields (and
-   * sibling keys of a nested jsonb object) survive; the queued PAYLOAD stays the
-   * partial patch (the backend COALESCEs it). Default is whole-row replace.
-   *
-   * @param {(write:object)=>Promise<{id:string,committed_version:number}>} send
-   * @param {"upsert"|"delete"} [op="upsert"]
-   * @param {boolean} [merge=false]
+   * local_queue: visible local mutation + queue, return without network IO.
+   * optimistic: visible local mutation + queue, then await the immediate send.
+   * pessimistic: queue + send first; make the acknowledged payload visible only
+   * after the server accepts it.
    */
-  async function optimisticWrite(table, id, row, send, op = "upsert", merge = false) {
+  async function write(
+    table,
+    id,
+    row,
+    send,
+    { op = "upsert", mutation = "replace", policy: policyOverride } = {},
+  ) {
+    if (op !== "upsert" && op !== "delete") {
+      throw new TypeError(`unsupported sync write operation: ${op}`);
+    }
+    if (mutation !== "replace" && mutation !== "merge") {
+      throw new TypeError(`unsupported sync mutation mode: ${mutation}`);
+    }
+    const context = { table, op, mutation };
+    const policy = policyFor(context, policyOverride);
+    if (policy.strategy !== "local_queue" && typeof send !== "function") {
+      throw new TypeError(
+        `sync write strategy ${policy.strategy} requires a send function`,
+      );
+    }
+    const span = beginTelemetry(context, policy);
     const { write, seq } = await mutate(async () => {
       const meta = await store.meta(table, id);
       const base_version = meta?.version ?? 0;
-      // Merge mode: fold the partial patch into the row already held. The mutate
-      // gate serializes this read+merge with every other client state transition,
-      // so it can't race. We send the MERGED value (not the partial): the backend
-      // COALESCEs at the column level, so a partial jsonb would clobber sibling
-      // keys server-side and its authoritative echo would then overwrite our local
-      // merge. Sending the merged whole value keeps client and server consistent.
       const localRow =
-        merge && op !== "delete" ? deepMerge(await store.get(table, id), row) : row;
+        mutation === "merge" && op !== "delete"
+          ? deepMerge(await store.get(table, id), row)
+          : row;
       const payload = op === "delete" ? null : localRow;
-      // `key` rides along durably so every retry of this write (here or from
-      // flushQueue after a reload) presents the same Idempotency-Key, while a
-      // subsequent distinct write to the same row never shares it.
-      const write = { id, table, op, payload, base_version, key: mintWriteKey() };
-      // The optimistic row mutation and queue append commit atomically. Splitting
-      // them into two transactions would allow a crash to leave a dirty row (or a
-      // deleted row) with no durable retry intent.
-      const seq = await queue.enqueueOptimistic(write, localRow);
+      const write = {
+        id,
+        table,
+        op,
+        payload,
+        base_version,
+        key: mintWriteKey(),
+        write_policy: policy,
+      };
+      const seq =
+        policy.strategy === "pessimistic"
+          ? await queue.enqueue(write)
+          : await queue.enqueueOptimistic(write, localRow);
       return { write, seq };
     });
+    reportTelemetry(context, policy, "local_queued", {}, span);
 
+    if (policy.strategy === "local_queue") {
+      span?.end?.();
+      return { status: "queued", attempts: 0 };
+    }
     try {
+      reportTelemetry(context, policy, "send_started", {}, span);
       const ack = validateAck(write, await send(write));
-      const outcome = await mutate(() => _applyAck(table, id, ack, seq));
+      const outcome = await mutate(() =>
+        _applyAck(table, id, ack, seq, policy.strategy),
+      );
+      reportTelemetry(context, policy, "acknowledged", {}, span);
+      span?.end?.();
       return {
         status: "acked",
         version: outcome && typeof outcome === "object" ? outcome.Adopt : undefined,
@@ -208,10 +366,58 @@ export function makeSyncClient({ store, queue, core }) {
         failure.sendError = err;
         throw failure;
       }
-      if (attempts === 0) return { status: "acked", via: "echo" };
-      // Stays queued (+ dirty for upserts) for the next flush. Offline-capable.
-      return { status: "queued", error: String(err), attempts };
+      if (attempts === 0) {
+        reportTelemetry(context, policy, "acknowledged", {}, span);
+        span?.end?.();
+        return { status: "acked", via: "echo" };
+      }
+      const result = {
+        status: "queued",
+        ...(policy.failure_mode === "emit_only"
+          ? {}
+          : { error: String(err) }),
+        attempts,
+      };
+      const extra = { attempts, error_type: errorType(err) };
+      reportTelemetry(context, policy, "failed", extra, span);
+      reportTelemetry(context, policy, "retry_scheduled", extra, span);
+      span?.error?.(extra.error_type);
+      span?.end?.();
+      if (policy.failure_mode === "throw_error") {
+        throw new SyncWriteError("sync write failed; retry remains durable", {
+          cause: err,
+          result,
+          write,
+        });
+      }
+      return result;
     }
+  }
+
+  /**
+   * Compatibility wrapper retaining the original optimistic API. New call sites
+   * should prefer write(..., { policy }) so strategy and failure behavior are
+   * explicit enum values rather than boolean switches.
+   */
+  async function optimisticWrite(
+    table,
+    id,
+    row,
+    send,
+    op = "upsert",
+    merge = false,
+  ) {
+    const context = {
+      table,
+      op,
+      mutation: merge ? "merge" : "replace",
+    };
+    const configured = policyFor(context);
+    return write(table, id, row, send, {
+      op,
+      mutation: merge ? "merge" : "replace",
+      policy: { ...configured, strategy: "optimistic" },
+    });
   }
 
   /** Optimistically delete a row (see optimisticWrite with op:"delete"). */
@@ -222,8 +428,8 @@ export function makeSyncClient({ store, queue, core }) {
   /**
    * Optimistic PARTIAL update: deep-merge `patch` into the row already held (so a
    * single changed field or one key of a nested jsonb object keeps its siblings),
-   * while sending only the partial `patch` to the backend to COALESCE. This is the
-   * right entry point for form/single-field edits (e.g. the htmx extension).
+   * then queue and send that merged whole-row value. This is the right entry
+   * point for form/single-field edits (e.g. the htmx extension).
    */
   function optimisticPatch(table, id, patch, send, op = "upsert") {
     return optimisticWrite(table, id, patch, send, op, true);
@@ -243,7 +449,15 @@ export function makeSyncClient({ store, queue, core }) {
     for (const w of await mutate(() => queue.list())) {
       try {
         const ack = validateAck(w, await send(w));
-        await mutate(() => _applyAck(w.table, w.id, ack, w.seq));
+        await mutate(() =>
+          _applyAck(
+            w.table,
+            w.id,
+            ack,
+            w.seq,
+            w.write_policy?.strategy,
+          ),
+        );
         flushed += 1;
       } catch (error) {
         let attempts;
@@ -336,5 +550,13 @@ export function makeSyncClient({ store, queue, core }) {
     return mutate(() => _hydrate(table, rows, options));
   }
 
-  return { applyChange, optimisticWrite, optimisticPatch, optimisticDelete, flushQueue, hydrate };
+  return {
+    applyChange,
+    write,
+    optimisticWrite,
+    optimisticPatch,
+    optimisticDelete,
+    flushQueue,
+    hydrate,
+  };
 }

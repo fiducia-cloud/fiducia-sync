@@ -1,4 +1,34 @@
 export type ChangeOp = "upsert" | "delete";
+export type SyncWriteStrategy =
+  | "local_queue"
+  | "optimistic"
+  | "pessimistic";
+export type SyncFailureMode =
+  | "return_result"
+  | "throw_error"
+  | "emit_only";
+export type SyncTelemetryLevel =
+  | "off"
+  | "errors"
+  | "lifecycle"
+  | "verbose";
+export type SyncMutationMode = "replace" | "merge";
+export type BrowserPersistence =
+  | "indexeddb"
+  | "local_storage"
+  | "indexeddb_with_local_storage_fallback";
+
+export interface SyncWritePolicy {
+  strategy: SyncWriteStrategy;
+  failure_mode: SyncFailureMode;
+  telemetry: SyncTelemetryLevel;
+}
+
+export interface SyncWriteContext {
+  table: string;
+  op: ChangeOp;
+  mutation: SyncMutationMode;
+}
 
 export interface ChangeEvent<Row = Record<string, unknown>> {
   table: string;
@@ -16,6 +46,12 @@ export interface LocalRowMeta {
   dirty: boolean;
 }
 
+export interface SyncReplicaMetadata extends LocalRowMeta {
+  created_at_ms: number;
+  updated_at_ms: number;
+  synced_at_ms?: number;
+}
+
 export interface QueuedWrite<Row = Record<string, unknown>> {
   seq?: number;
   id: string;
@@ -25,6 +61,7 @@ export interface QueuedWrite<Row = Record<string, unknown>> {
   base_version: number;
   key?: string;
   attempts?: number;
+  write_policy?: SyncWritePolicy;
 }
 
 export interface WriteAck {
@@ -48,6 +85,7 @@ export interface SyncCore {
 export interface SyncStore {
   get<Row = Record<string, unknown>>(table: string, id: string): Promise<Row | null>;
   meta(table: string, id: string): Promise<LocalRowMeta | null>;
+  replicaMeta(table: string, id: string): Promise<SyncReplicaMetadata | null>;
   put<Row = Record<string, unknown>>(
     table: string,
     id: string,
@@ -64,7 +102,8 @@ export interface SyncStore {
   getCursor(scope?: string): Promise<number>;
   setCursor(cursor: number, scope?: string): Promise<number>;
   close(): void;
-  readonly _db: IDBDatabase;
+  readonly storageKind: "indexeddb" | "local_storage";
+  readonly _db?: IDBDatabase;
 }
 
 export interface SyncQueue {
@@ -76,6 +115,12 @@ export interface SyncQueue {
   list<Row = Record<string, unknown>>(): Promise<Array<QueuedWrite<Row> & { seq: number }>>;
   remove(seq: number): Promise<void>;
   settleAck(
+    table: string,
+    id: string,
+    seq: number,
+    committedVersion: number,
+  ): Promise<AckOutcome>;
+  settlePessimistic(
     table: string,
     id: string,
     seq: number,
@@ -98,6 +143,48 @@ export interface OptimisticResult {
   attempts?: number;
 }
 
+export type SyncWriteResult = OptimisticResult;
+
+export interface SyncTelemetryEvent {
+  phase:
+    | "local_queued"
+    | "send_started"
+    | "acknowledged"
+    | "retry_scheduled"
+    | "failed"
+    | "conflict_resolved";
+  strategy: SyncWriteStrategy;
+  table: string;
+  op: ChangeOp;
+  at_ms: number;
+  attempts?: number;
+  error_type?: string;
+}
+
+export interface SyncTelemetrySpan {
+  event?(phase: SyncTelemetryEvent["phase"], attributes?: Record<string, unknown>): void;
+  error?(errorType: string): void;
+  end?(): void;
+}
+
+export interface SyncTelemetry {
+  startWrite?(context: {
+    table: string;
+    op: ChangeOp;
+    strategy: SyncWriteStrategy;
+    storage: "indexeddb" | "local_storage";
+  }): SyncTelemetrySpan | undefined;
+  emit?(
+    event: SyncTelemetryEvent,
+    context: {
+      table: string;
+      op: ChangeOp;
+      strategy: SyncWriteStrategy;
+      storage: "indexeddb" | "local_storage";
+    },
+  ): void;
+}
+
 export interface HydrateResult {
   applied: number;
   ignored: number;
@@ -107,6 +194,17 @@ export interface HydrateResult {
 
 export interface SyncClient {
   applyChange(event: ChangeEvent): Promise<string>;
+  write<Row = Record<string, unknown>>(
+    table: string,
+    id: string,
+    row: Row | null,
+    send: SendWrite<Row> | undefined,
+    options?: {
+      op?: ChangeOp;
+      mutation?: SyncMutationMode;
+      policy?: SyncWritePolicy;
+    },
+  ): Promise<SyncWriteResult>;
   optimisticWrite<Row = Record<string, unknown>>(
     table: string,
     id: string,
@@ -184,6 +282,12 @@ export interface StartSyncOptions {
   hydratePrune?: boolean;
   cursorScope?: string;
   pullPageSize?: number;
+  writePolicy?: SyncWritePolicy;
+  resolveWritePolicy?: (context: SyncWriteContext) => SyncWritePolicy;
+  telemetry?: SyncTelemetry;
+  persistence?: BrowserPersistence;
+  localStorage?: Pick<Storage, "getItem" | "setItem">;
+  onPersistenceFallback?: (error: unknown) => void;
 }
 
 export interface SyncHandle {
@@ -197,6 +301,20 @@ export interface SyncHandle {
 }
 
 export function openStore(dbName: string, tables: string[]): Promise<SyncStore>;
+export function openLocalStorageStore(
+  dbName: string,
+  tables: string[],
+  options?: { storage?: Pick<Storage, "getItem" | "setItem"> },
+): Promise<SyncStore>;
+export function openBrowserStore(
+  dbName: string,
+  tables: string[],
+  options?: {
+    persistence?: BrowserPersistence;
+    storage?: Pick<Storage, "getItem" | "setItem">;
+    onFallback?: (error: unknown) => void;
+  },
+): Promise<SyncStore>;
 export function makeQueue(store: SyncStore): SyncQueue;
 export function promisify<T = unknown>(request: IDBRequest<T>): Promise<T>;
 export function deepMerge<T>(base: T, patch: unknown): T;
@@ -206,8 +324,39 @@ export function makeSyncClient(deps: {
   store: SyncStore;
   queue: SyncQueue;
   core: SyncCore;
+  writePolicy?: SyncWritePolicy;
+  resolveWritePolicy?: (context: SyncWriteContext) => SyncWritePolicy;
+  telemetry?: SyncTelemetry;
 }): SyncClient;
 export function startSync(options: StartSyncOptions): Promise<SyncHandle>;
+
+export const DEFAULT_WRITE_POLICY: Readonly<SyncWritePolicy>;
+export class SyncWriteError extends Error {
+  readonly result?: SyncWriteResult;
+  readonly write?: QueuedWrite;
+}
+
+export function makeOpenTelemetryTelemetry(options?: {
+  tracer?: {
+    startSpan?(
+      name: string,
+      options?: { attributes?: Record<string, unknown> },
+    ): {
+      addEvent?(name: string, attributes?: Record<string, unknown>): void;
+      setAttribute?(name: string, value: unknown): void;
+      setStatus?(status: { code: number; message?: string }): void;
+      end?(): void;
+    };
+  };
+  logger?: {
+    emit?(record: {
+      severityNumber: number;
+      severityText: string;
+      body: string;
+      attributes: Record<string, unknown>;
+    }): void;
+  };
+}): SyncTelemetry;
 
 export function subscribeSupabase(options: {
   client: SupabaseClientLike;

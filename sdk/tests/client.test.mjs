@@ -10,6 +10,12 @@ import { wrapCore } from "../src/core.mjs";
 import { makeSyncClient } from "../src/client.mjs";
 
 const core = wrapCore(wasm);
+const policy = (overrides = {}) => ({
+  strategy: "optimistic",
+  failure_mode: "return_result",
+  telemetry: "off",
+  ...overrides,
+});
 let n = 0;
 async function setup() {
   n += 1;
@@ -61,6 +67,133 @@ test("optimisticWrite stays queued + dirty when the send fails (offline)", async
   assert.equal(res.attempts, 1);
   assert.deepEqual(await store.meta("api_keys", "k1"), { version: 2, dirty: true }); // awaiting retry
   assert.equal((await queue.list())[0].attempts, 1);
+});
+
+test("local_queue commits locally and durably without invoking the transport", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+
+  let sends = 0;
+  const result = await client.write(
+    "api_keys",
+    "k1",
+    { name: "offline-first" },
+    async () => {
+      sends += 1;
+      throw new Error("must not send");
+    },
+    { policy: policy({ strategy: "local_queue" }) },
+  );
+
+  assert.deepEqual(result, { status: "queued", attempts: 0 });
+  assert.equal(sends, 0);
+  assert.deepEqual(await store.get("api_keys", "k1"), {
+    name: "offline-first",
+  });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 0,
+    dirty: true,
+  });
+  assert.equal((await queue.list()).length, 1);
+});
+
+test("pessimistic writes do not become visible until the server acknowledges", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+  await store.put(
+    "api_keys",
+    "k1",
+    { name: "server" },
+    { version: 4, dirty: false },
+  );
+
+  const result = await client.write(
+    "api_keys",
+    "k1",
+    { name: "accepted" },
+    async (write) => {
+      assert.deepEqual(await store.get("api_keys", "k1"), { name: "server" });
+      assert.equal((await queue.list()).length, 1);
+      return { id: write.id, committed_version: 5 };
+    },
+    { policy: policy({ strategy: "pessimistic" }) },
+  );
+
+  assert.deepEqual(result, { status: "acked", version: 5 });
+  assert.deepEqual(await store.get("api_keys", "k1"), { name: "accepted" });
+  assert.deepEqual(await store.meta("api_keys", "k1"), {
+    version: 5,
+    dirty: false,
+  });
+  assert.equal((await queue.list()).length, 0);
+});
+
+test("throw_error and emit_only preserve durable retries with distinct caller behavior", async (t) => {
+  const { store, queue, client } = await setup();
+  t.after(() => store.close());
+  const offline = async () => {
+    throw new Error("offline");
+  };
+
+  await assert.rejects(
+    () =>
+      client.write("api_keys", "throw", { name: "a" }, offline, {
+        policy: policy({ failure_mode: "throw_error" }),
+      }),
+    (error) => {
+      assert.equal(error.name, "SyncWriteError");
+      assert.equal(error.result.status, "queued");
+      assert.equal(error.result.attempts, 1);
+      return true;
+    },
+  );
+  const emitted = await client.write(
+    "api_keys",
+    "emit",
+    { name: "b" },
+    offline,
+    { policy: policy({ failure_mode: "emit_only" }) },
+  );
+  assert.deepEqual(emitted, { status: "queued", attempts: 1 });
+  assert.equal((await queue.list()).length, 2);
+});
+
+test("lifecycle telemetry is low-cardinality and never contains row identity or payload", async (t) => {
+  const events = [];
+  const spans = [];
+  const store = await openStore(`client-test-${++n}`, ["api_keys"]);
+  const queue = makeQueue(store);
+  const client = makeSyncClient({
+    store,
+    queue,
+    core,
+    writePolicy: policy({ telemetry: "lifecycle" }),
+    telemetry: {
+      startWrite(context) {
+        spans.push(context);
+        return { event() {}, end() {} };
+      },
+      emit(event, context) {
+        events.push({ event, context });
+      },
+    },
+  });
+  t.after(() => store.close());
+
+  await client.write(
+    "api_keys",
+    "secret-row-id",
+    { token: "secret-payload" },
+    async (write) => ({ id: write.id, committed_version: 1 }),
+  );
+
+  assert.deepEqual(
+    events.map(({ event }) => event.phase),
+    ["local_queued", "send_started", "acknowledged"],
+  );
+  assert.equal(spans[0].storage, "indexeddb");
+  const serialized = JSON.stringify({ events, spans });
+  assert.doesNotMatch(serialized, /secret-row-id|secret-payload/);
 });
 
 test("the echo of our own write is adopted, not flagged as a conflict", async (t) => {
