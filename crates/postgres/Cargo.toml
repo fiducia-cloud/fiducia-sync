@@ -1,0 +1,22 @@
+[package]
+name = "fiducia-sync-postgres"
+version = "0.1.0"
+edition = "2024"
+description = "SeaORM PostgreSQL change journal and cursor adapter for fiducia-sync"
+license = "MIT"
+repository = "https://github.com/fiducia-cloud/fiducia-sync"
+
+[dependencies]
+fiducia-sync-core = { version = "0.2.0", path = "../.." }
+sea-orm = { version = "2.0.0", default-features = false, features = [
+  "runtime-tokio-rustls",
+  "sqlx-postgres",
+  "with-json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
