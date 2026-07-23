@@ -23,10 +23,10 @@ export function wrapCore(wasm) {
 
 /**
  * Browser core: dynamically import the bundler-target wasm (built by
- * `npm run build:wasm` into ../pkg) and wrap it. Bundlers (Vite) resolve the
+ * `npm run build:wasm` into the package's `pkg/`) and wrap it. Bundlers (Vite) resolve the
  * `.wasm` asset automatically.
  */
 export async function loadBrowserCore() {
-  const wasm = await import("../../pkg/fiducia_sync_core.js");
+  const wasm = await import("../pkg/fiducia_sync_core.js");
   return wrapCore(wasm);
 }

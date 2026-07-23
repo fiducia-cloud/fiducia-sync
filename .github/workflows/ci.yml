@@ -19,6 +19,22 @@ jobs:
   core:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: fiducia_sync
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fiducia_sync"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/fiducia_sync
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
@@ -32,8 +48,9 @@ jobs:
           toolchain: "1.95.0"
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --all-targets --all-features --locked
+      - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cmp sql/postgres/001_fiducia_sync.sql crates/postgres/migrations/001_fiducia_sync.sql
       - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
         with:
           tool: cargo-audit@0.22.2
@@ -59,10 +76,33 @@ jobs:
         with:
           node-version: "22.22.1"
       - name: build node-target wasm
-        run: wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm --locked
+        run: wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
       - name: sdk tests
         working-directory: sdk
         run: |
           npm ci --ignore-scripts
+          npm run typecheck
           node --test tests/*.test.mjs
+          npm pack --dry-run
           npm audit --audit-level=high
+
+  # Strongly typed Flutter API plus the durable SQLite implementation and
+  # Supabase/client JSON transport adapters.
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          cache: true
+      - name: Flutter checks
+        working-directory: dart
+        run: |
+          flutter pub get
+          dart format --output=none --set-exit-if-changed lib test
+          flutter analyze
+          flutter test

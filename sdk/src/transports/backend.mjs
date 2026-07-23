@@ -326,10 +326,18 @@ export async function backendSend(baseUrl, write, opts = {}) {
     headers["authorization"] = `Bearer ${token}`;
   }
 
+  const wireWrite = {
+    id: write.id,
+    table: write.table,
+    op: write.op ?? "upsert",
+    payload: write.payload ?? null,
+    base_version: write.base_version,
+    key,
+  };
   const res = await fetchImpl(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(write),
+    body: JSON.stringify(wireWrite),
   });
   if (!res.ok) throw new Error(`sync write failed: ${res.status}`);
   const ack = await res.json();

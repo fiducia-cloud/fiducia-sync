@@ -190,6 +190,14 @@ test("backendSend sets plane, idempotency, bearer, and same-origin CSRF headers"
   assert.equal(captured.init.headers["idempotency-key"], "api_keys:k1:upsert:3");
   assert.equal(captured.init.headers["authorization"], "Bearer tok");
   assert.equal(captured.init.headers["x-fiducia-csrf"], "csrf-bound-to-session");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    id: "k1",
+    table: "api_keys",
+    op: "upsert",
+    payload: null,
+    base_version: 3,
+    key: "api_keys:k1:upsert:3",
+  });
   assert.deepEqual(ack, { id: "k1", committed_version: 7 });
 });
 

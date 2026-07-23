@@ -1,6 +1,6 @@
 // Client tests run against the REAL Rust reconcile core (node-target wasm), so
 // there is one source of truth for the sync logic. Build it first:
-//   npm run build:wasm  (bundler) ; for these tests: wasm-pack build --target nodejs --out-dir pkg-node -- --features wasm --locked
+//   npm run build:wasm  (bundler) ; for these tests: wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import { test } from "node:test";

@@ -1,12 +1,19 @@
+[workspace]
+members = ["crates/postgres"]
+default-members = [".", "crates/postgres"]
+resolver = "2"
+
 # Crate manifest for fiducia-sync-core: the transport-agnostic sync core. Builds
 # as both rlib (native tests + server-side reuse) and cdylib (wasm); wasm-bindgen
 # is gated behind the optional `wasm` feature.
 [package]
 name = "fiducia-sync-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Transport-agnostic local-first sync core (version reconciliation + write-queue) for fiducia.cloud. Builds native for tests and to wasm for the @fiducia/sync SDK; the same crate is reusable server-side."
 license = "MIT"
+repository = "https://github.com/fiducia-cloud/fiducia-sync"
+include = ["/src/**", "/tests/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [lib]
 # rlib for native unit tests + server-side reuse; cdylib for the wasm build.

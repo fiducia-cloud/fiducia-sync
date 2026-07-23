@@ -17,14 +17,17 @@ export function promisify(request) {
 }
 
 const QUEUE_STORE = "_queue";
+const META_STORE = "_sync_meta";
 
 function ensureStores(db, tables) {
-  for (const table of [...new Set([...tables, QUEUE_STORE])]) {
+  for (const table of [...new Set([...tables, QUEUE_STORE, META_STORE])]) {
     if (!db.objectStoreNames.contains(table)) {
       db.createObjectStore(
         table,
         table === QUEUE_STORE
           ? { keyPath: "seq", autoIncrement: true }
+          : table === META_STORE
+            ? { keyPath: "key" }
           : { keyPath: "id" },
       );
     }
@@ -95,7 +98,7 @@ async function withStore(db, name, mode, operation) {
  * @param {string[]} tables synced table names (one object store each)
  */
 export async function openStore(dbName, tables) {
-  const requiredStores = [...new Set([...tables, QUEUE_STORE])];
+  const requiredStores = [...new Set([...tables, QUEUE_STORE, META_STORE])];
   let db = await openDatabase(dbName, undefined, tables);
 
   // IndexedDB only exposes schema changes during a version upgrade. Opening an
@@ -180,6 +183,34 @@ export async function openStore(dbName, tables) {
         promisify(objectStore.getAll()),
       );
       return recs.map((r) => r.row);
+    },
+
+    /** Durable plane-wide catch-up cursor. */
+    async getCursor(scope = "global") {
+      const rec = await withStore(db, META_STORE, "readonly", (objectStore) =>
+        promisify(objectStore.get(`cursor:${scope}`)),
+      );
+      return rec?.value ?? 0;
+    },
+
+    /**
+     * Advance a durable cursor after every change in its page is reconciled.
+     * Regressions are rejected because concurrent reconnects must not move a
+     * plane behind work that was already durably applied.
+     */
+    async setCursor(cursor, scope = "global") {
+      if (!Number.isSafeInteger(cursor) || cursor < 0) {
+        throw new Error("sync cursor must be a non-negative safe integer");
+      }
+      return withStore(db, META_STORE, "readwrite", async (objectStore) => {
+        const key = `cursor:${scope}`;
+        const current = await promisify(objectStore.get(key));
+        if (current && cursor < current.value) {
+          throw new Error("sync cursor cannot move backwards");
+        }
+        await promisify(objectStore.put({ key, value: cursor }));
+        return cursor;
+      });
     },
 
     _db: db,

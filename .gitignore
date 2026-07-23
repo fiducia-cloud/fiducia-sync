@@ -3,8 +3,13 @@ target/
 Cargo.lock
 pkg/
 pkg-web/
+sdk/pkg/
 dist/
 sdk/admin/dist/
+dart/.dart_tool/
+dart/.flutter-plugins-dependencies
+dart/build/
+dart/pubspec.lock
 .env
 .env.*
 !.env.example
