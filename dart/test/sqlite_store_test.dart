@@ -43,6 +43,41 @@ void main() {
   });
 
   test(
+    'replica timestamps preserve creation and advance synchronization',
+    () async {
+      final store = await openStore();
+      await store.put('items', 'one', const {
+        'id': 'one',
+        'name': 'server',
+      }, const LocalRowMetadata(version: 2, dirty: false));
+      final initial = (await store.read('items', 'one'))!.metadata;
+      expect(initial.createdAtMs, isNotNull);
+      expect(initial.updatedAtMs, isNotNull);
+      expect(initial.syncedAtMs, isNotNull);
+
+      const write = QueuedWrite(
+        id: 'one',
+        table: 'items',
+        operation: ChangeOperation.upsert,
+        payload: {'id': 'one', 'name': 'local'},
+        baseVersion: 2,
+      );
+      final sequence = await store.enqueueOptimistic(write, write.payload);
+      final dirty = (await store.read('items', 'one'))!.metadata;
+      expect(dirty.createdAtMs, initial.createdAtMs);
+      expect(dirty.syncedAtMs, initial.syncedAtMs);
+      expect(dirty.dirty, isTrue);
+
+      await store.settleAcknowledgement('items', 'one', sequence, 3);
+      final synced = (await store.read('items', 'one'))!.metadata;
+      expect(synced.version, 3);
+      expect(synced.dirty, isFalse);
+      expect(synced.syncedAtMs! >= initial.syncedAtMs!, isTrue);
+      await store.close();
+    },
+  );
+
+  test(
     'an exact realtime echo adopts server data and retires its write',
     () async {
       final store = await openStore();

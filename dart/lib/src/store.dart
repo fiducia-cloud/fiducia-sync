@@ -1,4 +1,3 @@
-import 'hlc.dart';
 import 'models.dart';
 
 final class StoredRow {
@@ -23,16 +22,6 @@ final class AckSettlement {
   final int? version;
 }
 
-/// Plane-level sync freshness (see [SyncStore.syncInfo]).
-final class SyncFreshness {
-  const SyncFreshness({required this.cursor, this.lastSyncedAtMs});
-
-  final int cursor;
-
-  /// Last completed catch-up on this device (null before the first).
-  final int? lastSyncedAtMs;
-}
-
 abstract interface class SyncStore {
   Future<StoredRow?> read(String table, String id);
 
@@ -47,17 +36,20 @@ abstract interface class SyncStore {
 
   Future<void> delete(String table, String id);
 
-  /// `hlcState` (when given) persists the write's Hybrid Logical Clock state
-  /// in the SAME transaction as the mutation + queue append.
-  Future<int> enqueueOptimistic(
-    QueuedWrite write,
-    JsonMap? row, {
-    HlcStamp? hlcState,
-  });
+  Future<int> enqueue(QueuedWrite write);
+
+  Future<int> enqueueOptimistic(QueuedWrite write, JsonMap? row);
 
   Future<List<QueuedWrite>> queuedWrites();
 
   Future<AckSettlement> settleAcknowledgement(
+    String table,
+    String id,
+    int sequence,
+    int committedVersion,
+  );
+
+  Future<AckSettlement> settlePessimistic(
     String table,
     String id,
     int sequence,
@@ -73,17 +65,6 @@ abstract interface class SyncStore {
   Future<int> getCursor([String scope = 'global']);
 
   Future<void> setCursor(int cursor, [String scope = 'global']);
-
-  /// Record "this plane finished a successful catch-up now"; returns the stamp.
-  Future<int> markSynced([String scope = 'global']);
-
-  /// The durable cursor plus the last completed catch-up moment for `scope`.
-  Future<SyncFreshness> syncInfo([String scope = 'global']);
-
-  /// Persisted Hybrid Logical Clock state (null before the first stamp).
-  Future<HlcStamp?> getHlcState();
-
-  Future<void> setHlcState(HlcStamp state);
 
   Future<void> close();
 }

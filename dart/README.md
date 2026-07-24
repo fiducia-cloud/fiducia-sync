@@ -9,9 +9,9 @@ final store = await SqliteSyncStore.open('fiducia.db');
 final sync = FiduciaSyncClient(store: store);
 ```
 
-`SqliteSyncStore` atomically persists optimistic rows with their queue entries,
-acknowledgements with queue retirement, server-wins conflict resolution, retry
-counts, and incremental pull cursors.
+`SqliteSyncStore` atomically persists local rows with their queue entries,
+write policy, replica timestamps, acknowledgements with queue retirement,
+server-wins conflict resolution, retry counts, and incremental pull cursors.
 
 For Supabase, create `SupabaseSyncTransport` with tenant-scoped realtime filters.
 Its `pull()` uses the migration's `fiducia_sync_pull` RPC. Its `send()` requires
@@ -31,12 +31,29 @@ final pull = adaptJsonPuller(
 );
 
 await sync.pull(pull);
-await sync.optimisticWrite(
+await sync.write(
   table: 'infra_operations',
   id: operationId,
   row: {'id': operationId, 'state': 'queued'},
   send: send,
+  policy: const SyncWritePolicy(
+    strategy: SyncWriteStrategy.optimistic,
+    failureMode: SyncFailureMode.returnResult,
+    telemetry: SyncTelemetryLevel.lifecycle,
+  ),
 );
 ```
+
+`SyncWriteStrategy` is `localQueue`, `optimistic`, or `pessimistic`;
+`SyncFailureMode` is `returnResult`, `throwError`, or `emitOnly`; and
+`SyncTelemetryLevel` is `off`, `errors`, `lifecycle`, or `verbose`. Configure a
+client default, a per-table/operation resolver, or an individual write.
+`optimisticWrite()` remains as a compatibility wrapper.
+
+The OpenTelemetry bridge emits low-cardinality lifecycle data and excludes row
+ids, payloads, write keys, and error messages. Replica `createdAtMs`,
+`updatedAtMs`, and `syncedAtMs` are local UI/diagnostic metadata; only the
+server-owned row `version` is the conflict clock. See
+[`../docs/write-policies-and-replication.md`](../docs/write-policies-and-replication.md).
 
 Run `flutter analyze` and `flutter test` from this directory.

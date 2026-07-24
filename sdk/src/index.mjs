@@ -20,27 +20,22 @@
 //   });
 
 export { openStore, makeQueue, promisify } from "./store.mjs";
-export { openWebStorageStore, makeWebStorageQueue } from "./webstorage.mjs";
+export {
+  openBrowserStore,
+  openLocalStorageStore,
+} from "./local-storage.mjs";
 export { deepMerge } from "./merge.mjs";
 export { wrapCore, loadBrowserCore } from "./core.mjs";
-export { makeSyncClient } from "./client.mjs";
-export { startSync } from "./start.mjs";
 export {
-  WRITE_POLICIES,
-  ERROR_MODES,
   DEFAULT_WRITE_POLICY,
-  DEFAULT_ERROR_MODE,
   SyncWriteError,
-  assertWritePolicy,
-  assertErrorMode,
-} from "./policy.mjs";
-export {
-  TELEMETRY_EVENTS,
-  noopTelemetry,
-  normalizeTelemetry,
-  otelTelemetry,
-} from "./telemetry.mjs";
+  makeSyncClient,
+} from "./client.mjs";
+export { makeOpenTelemetryTelemetry } from "./telemetry.mjs";
+export { startSync } from "./start.mjs";
+// Device-monotonic Hybrid Logical Clock (advisory stamps; see docs/timestamps.md).
 export { makeHlc, encodeHlc, decodeHlc, HLC_MAX_WALL_MS, HLC_MAX_COUNTER } from "./hlc.mjs";
+// Canonical-schema runtime validation (see docs/validation.md).
 export { SYNC_SCHEMA } from "./sync-schema.mjs";
 export {
   makeValidator,

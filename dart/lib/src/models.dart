@@ -13,6 +13,100 @@ enum ChangeOperation {
   }
 }
 
+enum SyncWriteStrategy {
+  localQueue('local_queue'),
+  optimistic('optimistic'),
+  pessimistic('pessimistic');
+
+  const SyncWriteStrategy(this.wireName);
+  final String wireName;
+
+  static SyncWriteStrategy fromWire(Object? value) => values.firstWhere(
+    (candidate) => candidate.wireName == value,
+    orElse: () =>
+        throw FormatException('unsupported sync write strategy: $value'),
+  );
+}
+
+enum SyncFailureMode {
+  returnResult('return_result'),
+  throwError('throw_error'),
+  emitOnly('emit_only');
+
+  const SyncFailureMode(this.wireName);
+  final String wireName;
+
+  static SyncFailureMode fromWire(Object? value) => values.firstWhere(
+    (candidate) => candidate.wireName == value,
+    orElse: () =>
+        throw FormatException('unsupported sync failure mode: $value'),
+  );
+}
+
+enum SyncTelemetryLevel {
+  off,
+  errors,
+  lifecycle,
+  verbose;
+
+  static SyncTelemetryLevel fromWire(Object? value) => values.firstWhere(
+    (candidate) => candidate.name == value,
+    orElse: () =>
+        throw FormatException('unsupported sync telemetry level: $value'),
+  );
+}
+
+enum SyncMutationMode { replace, merge }
+
+final class SyncWriteContext {
+  const SyncWriteContext({
+    required this.table,
+    required this.operation,
+    required this.mutation,
+  });
+
+  final String table;
+  final ChangeOperation operation;
+  final SyncMutationMode mutation;
+}
+
+final class SyncWritePolicy {
+  const SyncWritePolicy({
+    this.strategy = SyncWriteStrategy.optimistic,
+    this.failureMode = SyncFailureMode.returnResult,
+    this.telemetry = SyncTelemetryLevel.errors,
+  });
+
+  static const standard = SyncWritePolicy();
+
+  final SyncWriteStrategy strategy;
+  final SyncFailureMode failureMode;
+  final SyncTelemetryLevel telemetry;
+
+  SyncWritePolicy copyWith({
+    SyncWriteStrategy? strategy,
+    SyncFailureMode? failureMode,
+    SyncTelemetryLevel? telemetry,
+  }) => SyncWritePolicy(
+    strategy: strategy ?? this.strategy,
+    failureMode: failureMode ?? this.failureMode,
+    telemetry: telemetry ?? this.telemetry,
+  );
+
+  factory SyncWritePolicy.fromJson(Map<String, Object?> json) =>
+      SyncWritePolicy(
+        strategy: SyncWriteStrategy.fromWire(json['strategy']),
+        failureMode: SyncFailureMode.fromWire(json['failure_mode']),
+        telemetry: SyncTelemetryLevel.fromWire(json['telemetry']),
+      );
+
+  JsonMap toJson() => {
+    'strategy': strategy.wireName,
+    'failure_mode': failureMode.wireName,
+    'telemetry': telemetry.name,
+  };
+}
+
 final class SyncChange {
   const SyncChange({
     required this.table,
@@ -84,16 +178,15 @@ final class LocalRowMetadata {
   const LocalRowMetadata({
     required this.version,
     required this.dirty,
+    this.createdAtMs,
+    this.updatedAtMs,
     this.syncedAtMs,
   });
 
   final int version;
   final bool dirty;
-
-  /// When THIS device last adopted server-authoritative state for the row
-  /// (local wall clock, Unix ms); null until it has. Optimistic dirty writes
-  /// preserve the previous stamp — editing on top of synced state does not
-  /// un-sync it.
+  final int? createdAtMs;
+  final int? updatedAtMs;
   final int? syncedAtMs;
 }
 
@@ -108,7 +201,7 @@ final class QueuedWrite {
     this.sequence,
     this.attempts = 0,
     this.supersededVersion,
-    this.hlc,
+    this.writePolicy = SyncWritePolicy.standard,
   });
 
   final int? sequence;
@@ -120,10 +213,7 @@ final class QueuedWrite {
   final String? key;
   final int attempts;
   final int? supersededVersion;
-
-  /// Device-monotonic Hybrid Logical Clock stamp minted when the write was
-  /// queued (see hlc.dart). Advisory local metadata — never sent on the wire.
-  final String? hlc;
+  final SyncWritePolicy writePolicy;
 
   QueuedWrite copyWith({int? sequence, int? attempts, int? supersededVersion}) {
     return QueuedWrite(
@@ -136,7 +226,7 @@ final class QueuedWrite {
       key: key,
       attempts: attempts ?? this.attempts,
       supersededVersion: supersededVersion ?? this.supersededVersion,
-      hlc: hlc,
+      writePolicy: writePolicy,
     );
   }
 
@@ -150,7 +240,7 @@ final class QueuedWrite {
     if (key != null) 'key': key,
     'attempts': attempts,
     if (supersededVersion != null) 'superseded_version': supersededVersion,
-    if (hlc != null) 'hlc': hlc,
+    'write_policy': writePolicy.toJson(),
   };
 
   /// Strict `fiducia-interfaces` wire envelope without local queue metadata.
@@ -228,40 +318,46 @@ final class PullPage {
   }
 }
 
-/// Terminal state of one optimistic write call. `failed` only occurs under
-/// the pessimistic server-* policies (nothing was queued or applied locally).
-enum WriteStatus { acked, queued, failed }
-
 final class OptimisticWriteResult {
   const OptimisticWriteResult._({
-    required this.status,
+    required this.acknowledged,
     this.version,
     this.attempts,
     this.error,
   });
 
   factory OptimisticWriteResult.acknowledged([int? version]) =>
-      OptimisticWriteResult._(status: WriteStatus.acked, version: version);
+      OptimisticWriteResult._(acknowledged: true, version: version);
 
   factory OptimisticWriteResult.queued({
     required int attempts,
     Object? error,
   }) => OptimisticWriteResult._(
-    status: WriteStatus.queued,
+    acknowledged: false,
     attempts: attempts,
     error: error,
   );
 
-  factory OptimisticWriteResult.failed({Object? error}) =>
-      OptimisticWriteResult._(status: WriteStatus.failed, error: error);
-
-  final WriteStatus status;
+  final bool acknowledged;
   final int? version;
   final int? attempts;
   final Object? error;
+}
 
-  /// Back-compat alias: true when the server confirmed the write.
-  bool get acknowledged => status == WriteStatus.acked;
+final class SyncWriteException implements Exception {
+  const SyncWriteException({
+    required this.cause,
+    required this.result,
+    required this.write,
+  });
+
+  final Object cause;
+  final OptimisticWriteResult result;
+  final QueuedWrite write;
+
+  @override
+  String toString() =>
+      'SyncWriteException(sync write failed; retry remains durable)';
 }
 
 int _requiredInt(Object? value, String field) {

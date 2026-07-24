@@ -179,6 +179,155 @@ const String syncSchemaJson = r'''
           "description": "Whether another page should be requested immediately."
         }
       }
+    },
+    "SyncWritePolicy": {
+      "type": "object",
+      "title": "SyncWritePolicy",
+      "description": "Per-write client behavior. Strategy controls when local state becomes visible; failure_mode controls whether durable send failures are returned, thrown, or emitted; telemetry controls lifecycle detail.",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "failure_mode",
+        "telemetry"
+      ],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "local_queue",
+            "optimistic",
+            "pessimistic"
+          ],
+          "description": "local_queue commits locally and leaves transport to background flush; optimistic commits locally before awaiting the server; pessimistic keeps the old local value until acknowledgement or an authoritative echo."
+        },
+        "failure_mode": {
+          "type": "string",
+          "enum": [
+            "return_result",
+            "throw_error",
+            "emit_only"
+          ],
+          "description": "How a durable send failure is surfaced after retry intent is safely persisted."
+        },
+        "telemetry": {
+          "type": "string",
+          "enum": [
+            "off",
+            "errors",
+            "lifecycle",
+            "verbose"
+          ],
+          "description": "Maximum sync lifecycle detail emitted to the configured telemetry adapter."
+        }
+      }
+    },
+    "SyncReplicaMetadata": {
+      "type": "object",
+      "title": "SyncReplicaMetadata",
+      "description": "Replica-local durable metadata. created_at_ms and updated_at_ms describe this local copy; synced_at_ms is when authoritative server state was last applied. None of these timestamps participate in conflict ordering.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "dirty",
+        "created_at_ms",
+        "updated_at_ms"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Authoritative per-row version the local mutation is based on."
+        },
+        "dirty": {
+          "type": "boolean",
+          "description": "Whether an unacknowledged durable local write exists."
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "When this replica first stored the row."
+        },
+        "updated_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "When this replica last changed row data or sync metadata."
+        },
+        "synced_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "When this replica last durably applied authoritative server state."
+        }
+      }
+    },
+    "SyncTelemetryEvent": {
+      "type": "object",
+      "title": "SyncTelemetryEvent",
+      "description": "Low-cardinality write lifecycle event suitable for an OpenTelemetry adapter. Payloads, row ids, and idempotency keys are deliberately excluded.",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "strategy",
+        "table",
+        "op",
+        "at_ms"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": [
+            "local_queued",
+            "send_started",
+            "acknowledged",
+            "retry_scheduled",
+            "failed",
+            "conflict_resolved"
+          ],
+          "description": "Lifecycle transition being observed."
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "local_queue",
+            "optimistic",
+            "pessimistic"
+          ],
+          "description": "Write strategy selected for this operation."
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Logical collection name; maps to db.collection.name."
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "upsert",
+            "delete"
+          ],
+          "description": "Low-cardinality database operation."
+        },
+        "at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Local event time in Unix milliseconds."
+        },
+        "attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Durable retry count after this transition."
+        },
+        "error_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Stable exception or failure class; maps to error.type."
+        }
+      }
     }
   }
 }

@@ -34,12 +34,16 @@ test("shared fixture cases all agree with the canonical schema", () => {
 
 test("zod schemas built from the SAME document agree with every fixture case", () => {
   const schemas = zodSchemas(z);
-  assert.deepEqual(Object.keys(schemas).sort(), [
+  // The canonical document also carries policy/replica/telemetry defs; the four
+  // wire envelopes must always be among them.
+  for (const required of [
     "SyncChangeEvent",
     "SyncPullPage",
     "SyncQueuedWrite",
     "SyncWriteAcknowledgement",
-  ]);
+  ]) {
+    assert.ok(schemas[required], `missing zod schema for ${required}`);
+  }
   for (const { name, definition, valid, value } of fixtures.cases) {
     const outcome = schemas[definition].safeParse(value);
     assert.equal(
@@ -129,10 +133,13 @@ test("apps can validate their OWN row schemas with the same engine", () => {
 
 test("the embedded schema document is the canonical one", () => {
   assert.equal(SYNC_SCHEMA.$id, "https://fiducia.cloud/schemas/sync.schema.json");
-  assert.deepEqual(Object.keys(SYNC_SCHEMA.$defs).sort(), [
+  const defs = Object.keys(SYNC_SCHEMA.$defs);
+  for (const required of [
     "SyncChangeEvent",
     "SyncPullPage",
     "SyncQueuedWrite",
     "SyncWriteAcknowledgement",
-  ]);
+  ]) {
+    assert.ok(defs.includes(required), `missing canonical def ${required}`);
+  }
 });

@@ -68,11 +68,12 @@ transaction timestamps), pinned to the shared vectors in
   logical counter): lexicographic order equals causal order in every language,
   and it stays clear of JS's 2^53 integer limit.
 
-The clients mint a stamp per optimistic write (`QueuedWrite.hlc`) and persist
-clock state in the SAME transaction as the queue append, so device ordering
-survives reloads. Stamps are **advisory local metadata**: they are stripped
-from the strict wire envelopes and never participate in reconciliation — the
-row `version` stays the sole conflict arbiter.
+The HLC ships as a utility: apps stamp whatever local events they need ordered
+(offline edits, journal entries) via `makeHlc()` / `Hlc` and persist
+`state()` durably to keep stamps monotonic across restarts. Stamps are
+**advisory local metadata**: they are never sent in the strict wire envelopes
+and never participate in reconciliation — the row `version` stays the sole
+conflict arbiter.
 
 ## What we deliberately did NOT copy
 

@@ -19,6 +19,34 @@ export function promisify(request) {
 const QUEUE_STORE = "_queue";
 const META_STORE = "_sync_meta";
 
+function replicaRecord(existing, id, row, version, dirty, { synced = false } = {}) {
+  const at = Date.now();
+  const record = {
+    id,
+    row,
+    version,
+    dirty,
+    created_at_ms: existing?.created_at_ms ?? at,
+    updated_at_ms: at,
+  };
+  const syncedAt = synced ? at : existing?.synced_at_ms;
+  if (syncedAt !== undefined) record.synced_at_ms = syncedAt;
+  return record;
+}
+
+function touchReplicaRecord(
+  record,
+  { version, dirty, synced = false } = {},
+) {
+  const at = Date.now();
+  if (version !== undefined) record.version = version;
+  if (dirty !== undefined) record.dirty = dirty;
+  record.created_at_ms ??= at;
+  record.updated_at_ms = at;
+  if (synced) record.synced_at_ms = at;
+  return record;
+}
+
 function ensureStores(db, tables) {
   for (const table of [...new Set([...tables, QUEUE_STORE, META_STORE])]) {
     if (!db.objectStoreNames.contains(table)) {
@@ -94,20 +122,10 @@ async function withStore(db, name, mode, operation) {
 
 /**
  * Open (or create) the per-plane store.
- *
- * Every record carries `synced_at_ms` — the LOCAL wall-clock moment this
- * device last adopted server-authoritative state for the row (`null` until it
- * has). It is deliberately per-device (a replica fact, not a server fact —
- * the server-side columns are `created_at`/`updated_at` plus the journal's
- * `changed_at`/`at_ms`), stamped whenever a clean/authoritative payload lands
- * and preserved across dirty optimistic writes.
- *
  * @param {string} dbName  e.g. "fiducia-customer" / "fiducia-admin"
  * @param {string[]} tables synced table names (one object store each)
- * @param {object} [options]
- * @param {() => number} [options.now] wall clock, injectable for tests
  */
-export async function openStore(dbName, tables, { now = () => Date.now() } = {}) {
+export async function openStore(dbName, tables) {
   const requiredStores = [...new Set([...tables, QUEUE_STORE, META_STORE])];
   let db = await openDatabase(dbName, undefined, tables);
 
@@ -146,6 +164,7 @@ export async function openStore(dbName, tables, { now = () => Date.now() } = {})
   db.onversionchange = () => db.close();
 
   return {
+    storageKind: "indexeddb",
     /** The stored row (or null). */
     async get(table, id) {
       const rec = await withStore(db, table, "readonly", (objectStore) =>
@@ -154,52 +173,58 @@ export async function openStore(dbName, tables, { now = () => Date.now() } = {})
       return rec ? rec.row : null;
     },
 
-    /**
-     * Sync metadata { version, dirty, syncedAtMs } for a row (or null if
-     * absent). `syncedAtMs` is null until server-authoritative state has
-     * landed for the row on THIS device.
-     */
+    /** Sync metadata { version, dirty } for a row (or null if absent). */
     async meta(table, id) {
       const rec = await withStore(db, table, "readonly", (objectStore) =>
         promisify(objectStore.get(id)),
       );
-      return rec
-        ? {
-            version: rec.version,
-            dirty: Boolean(rec.dirty),
-            syncedAtMs: rec.synced_at_ms ?? null,
-          }
-        : null;
+      return rec ? { version: rec.version, dirty: Boolean(rec.dirty) } : null;
     },
 
     /**
-     * Upsert a row with its version; `dirty` marks an un-acked optimistic
-     * write. `syncedAtMs` may be forced; when omitted, a clean put stamps "the
-     * server state landed here now" and a dirty put preserves the previous
-     * stamp (an optimistic edit does not un-sync what it was based on).
+     * Replica-local lifecycle metadata. These timestamps describe this device's
+     * durable copy; conflict ordering continues to use the server-issued version.
      */
-    async put(table, id, row, { version, dirty = false, syncedAtMs }) {
+    async replicaMeta(table, id) {
+      const rec = await withStore(db, table, "readonly", (objectStore) =>
+        promisify(objectStore.get(id)),
+      );
+      if (!rec) return null;
+      return {
+        version: rec.version,
+        dirty: Boolean(rec.dirty),
+        created_at_ms: rec.created_at_ms,
+        updated_at_ms: rec.updated_at_ms,
+        ...(rec.synced_at_ms === undefined
+          ? {}
+          : { synced_at_ms: rec.synced_at_ms }),
+      };
+    },
+
+    /** Upsert a row with its version; `dirty` marks an un-acked optimistic write. */
+    async put(table, id, row, { version, dirty = false }) {
       await withStore(db, table, "readwrite", async (objectStore) => {
-        let synced = syncedAtMs;
-        if (synced === undefined) {
-          synced = dirty
-            ? ((await promisify(objectStore.get(id)))?.synced_at_ms ?? null)
-            : now();
-        }
+        const existing = await promisify(objectStore.get(id));
         await promisify(
-          objectStore.put({ id, row, version, dirty, synced_at_ms: synced ?? null }),
+          objectStore.put(
+            replicaRecord(existing, id, row, version, dirty, {
+              synced: !dirty,
+            }),
+          ),
         );
       });
     },
 
     /** Mark an existing row clean/dirty and (optionally) adopt a new version. */
-    async setMeta(table, id, { version, dirty, syncedAtMs }) {
+    async setMeta(table, id, { version, dirty }) {
       return withStore(db, table, "readwrite", async (objectStore) => {
         const rec = await promisify(objectStore.get(id));
         if (!rec) return false;
-        if (version !== undefined) rec.version = version;
-        if (dirty !== undefined) rec.dirty = dirty;
-        if (syncedAtMs !== undefined) rec.synced_at_ms = syncedAtMs;
+        touchReplicaRecord(rec, {
+          version,
+          dirty,
+          synced: dirty === false,
+        });
         await promisify(objectStore.put(rec));
         return true;
       });
@@ -242,61 +267,12 @@ export async function openStore(dbName, tables, { now = () => Date.now() } = {})
         if (current && cursor < current.value) {
           throw new Error("sync cursor cannot move backwards");
         }
-        await promisify(objectStore.put({ key, value: cursor, synced_at_ms: now() }));
+        await promisify(objectStore.put({ key, value: cursor }));
         return cursor;
       });
     },
 
-    /**
-     * Record "this plane finished a successful catch-up now" (also stamped
-     * implicitly by every cursor advance). Returns the stamp.
-     */
-    async markSynced(scope = "global") {
-      const at = now();
-      await withStore(db, META_STORE, "readwrite", (objectStore) =>
-        promisify(objectStore.put({ key: `synced:${scope}`, value: at })),
-      );
-      return at;
-    },
-
-    /**
-     * Plane-level sync freshness: the durable catch-up cursor and the last
-     * wall-clock moment this device completed a catch-up for `scope`
-     * (`lastSyncedAtMs` is null before the first one).
-     */
-    async syncInfo(scope = "global") {
-      return withStore(db, META_STORE, "readonly", async (objectStore) => {
-        const [cursorRec, syncedRec] = await Promise.all([
-          promisify(objectStore.get(`cursor:${scope}`)),
-          promisify(objectStore.get(`synced:${scope}`)),
-        ]);
-        const stamps = [cursorRec?.synced_at_ms, syncedRec?.value].filter(
-          (v) => typeof v === "number",
-        );
-        return {
-          cursor: cursorRec?.value ?? 0,
-          lastSyncedAtMs: stamps.length > 0 ? Math.max(...stamps) : null,
-        };
-      });
-    },
-
-    /** Persisted Hybrid Logical Clock state (see hlc.mjs), or null. */
-    async getHlcState() {
-      const rec = await withStore(db, META_STORE, "readonly", (objectStore) =>
-        promisify(objectStore.get("hlc:global")),
-      );
-      return rec ? { wallMs: rec.wallMs ?? 0, counter: rec.counter ?? 0 } : null;
-    },
-
-    /** Persist HLC state so device stamps stay monotonic across reloads. */
-    async setHlcState({ wallMs, counter }) {
-      await withStore(db, META_STORE, "readwrite", (objectStore) =>
-        promisify(objectStore.put({ key: "hlc:global", wallMs, counter })),
-      );
-    },
-
     _db: db,
-    _now: now,
     close() {
       db.close();
     },
@@ -308,8 +284,8 @@ export async function openStore(dbName, tables, { now = () => Date.now() } = {})
  * Survives reloads so writes made offline are re-sent on reconnect.
  */
 export function makeQueue(store) {
+  if (store._queueApi) return store._queueApi;
   const db = store._db;
-  const now = store._now ?? (() => Date.now());
   return {
     /** Append a write; returns its assigned seq. */
     async enqueue(write) {
@@ -321,52 +297,32 @@ export function makeQueue(store) {
      * Atomically apply an optimistic row mutation and append its retry record.
      * A crash or IndexedDB abort can therefore leave neither change, but never
      * a dirty/deleted row whose only durable resend intent is missing.
-     *
-     * `hlcState` (when given) persists the write's Hybrid Logical Clock state
-     * in the SAME transaction, so a stamp can never outlive a crash that its
-     * clock state did not.
      */
-    async enqueueOptimistic(write, row, { hlcState } = {}) {
+    async enqueueOptimistic(write, row) {
       return withTransaction(
         db,
-        hlcState
-          ? [write.table, QUEUE_STORE, META_STORE]
-          : [write.table, QUEUE_STORE],
+        [write.table, QUEUE_STORE],
         "readwrite",
         async (transaction) => {
           const rows = transaction.objectStore(write.table);
           const queued = transaction.objectStore(QUEUE_STORE);
-          const requests = [];
-          if (write.op === "delete") {
-            requests.push(promisify(rows.delete(write.id)));
-          } else {
-            // A dirty write keeps the row's previous synced_at_ms — editing on
-            // top of synced state does not un-sync it.
-            const existing = await promisify(rows.get(write.id));
-            requests.push(
-              promisify(
-                rows.put({
-                  id: write.id,
-                  row,
-                  version: write.base_version,
-                  dirty: true,
-                  synced_at_ms: existing?.synced_at_ms ?? null,
-                }),
-              ),
-            );
-          }
-          if (hlcState) {
-            requests.push(
-              promisify(
-                transaction
-                  .objectStore(META_STORE)
-                  .put({ key: "hlc:global", ...hlcState }),
-              ),
-            );
-          }
-          const [seq] = await Promise.all([
-            promisify(queued.add({ ...write, attempts: 0 })),
-            ...requests,
+          const existing = await promisify(rows.get(write.id));
+          const mutation =
+            write.op === "delete"
+              ? rows.delete(write.id)
+              : rows.put(
+                  replicaRecord(
+                    existing,
+                    write.id,
+                    row,
+                    write.base_version,
+                    true,
+                  ),
+                );
+          const queueRequest = queued.add({ ...write, attempts: 0 });
+          const [, seq] = await Promise.all([
+            promisify(mutation),
+            promisify(queueRequest),
           ]);
           return seq;
         },
@@ -436,10 +392,12 @@ export function makeQueue(store) {
           if (rec) {
             if (rec.version <= committedVersion) {
               rec.version = committedVersion;
-              rec.synced_at_ms = now(); // the server confirmed this state
               outcome = { Adopt: committedVersion };
             }
-            rec.dirty = hasOtherPendingWrite;
+            touchReplicaRecord(rec, {
+              dirty: hasOtherPendingWrite,
+              synced: true,
+            });
             requests.push(promisify(rows.put(rec)));
           }
           requests.push(promisify(queued.delete(seq)));
@@ -490,7 +448,10 @@ export function makeQueue(store) {
           let rowRequest;
           if (echoWasSuperseded) {
             if (rec) {
-              rec.dirty = remainingRowWrites.length > 0;
+              touchReplicaRecord(rec, {
+                dirty: remainingRowWrites.length > 0,
+                synced: true,
+              });
               rowRequest = rows.put(rec);
             }
           } else if (!hasNewerLocalWrite) {
@@ -498,20 +459,29 @@ export function makeQueue(store) {
               rowRequest =
                 event.op === "delete"
                   ? rows.delete(event.id)
-                  : rows.put({
-                      id: event.id,
-                      row: event.row,
-                      version: event.version,
-                      dirty: remainingRowWrites.length > 0,
-                      synced_at_ms: now(),
-                    });
+                  : rows.put(
+                      replicaRecord(
+                        rec,
+                        event.id,
+                        event.row,
+                        event.version,
+                        remainingRowWrites.length > 0,
+                        { synced: true },
+                      ),
+                    );
             } else {
-              rec.dirty = remainingRowWrites.length > 0;
+              touchReplicaRecord(rec, {
+                dirty: remainingRowWrites.length > 0,
+                synced: true,
+              });
               rowRequest = rows.put(rec);
             }
           } else if (rec) {
-            rec.version = Math.max(rec.version, event.version);
-            rec.dirty = true;
+            touchReplicaRecord(rec, {
+              version: Math.max(rec.version, event.version),
+              dirty: true,
+              synced: true,
+            });
             rowRequest = rows.put(rec);
           }
 
@@ -563,22 +533,106 @@ export function makeQueue(store) {
             rowRequest =
               event.op === "delete"
                 ? rows.delete(event.id)
-                : rows.put({
-                    id: event.id,
-                    row: event.row,
-                    version: event.version,
-                    dirty: false,
-                    synced_at_ms: now(),
-                  });
+                : rows.put(
+                    replicaRecord(
+                      rec,
+                      event.id,
+                      event.row,
+                      event.version,
+                      false,
+                      { synced: true },
+                    ),
+                  );
           } else if (rec) {
-            rec.version = Math.max(rec.version, event.version);
-            rec.dirty = true;
+            touchReplicaRecord(rec, {
+              version: Math.max(rec.version, event.version),
+              dirty: true,
+              synced: true,
+            });
             rowRequest = rows.put(rec);
           }
           const requests = [];
           if (rowRequest) requests.push(promisify(rowRequest));
           requests.push(...seqs.map((seq) => promisify(queued.delete(seq))));
           await Promise.all(requests);
+        },
+      );
+    },
+    /**
+     * Commit a pessimistic write atomically after its server acknowledgement.
+     * A newer optimistic value is preserved if one landed while this request was
+     * in flight; otherwise the acknowledged payload becomes locally visible.
+     */
+    async settlePessimistic(table, id, seq, committedVersion) {
+      return withTransaction(
+        db,
+        [table, QUEUE_STORE],
+        "readwrite",
+        async (transaction) => {
+          const rows = transaction.objectStore(table);
+          const queued = transaction.objectStore(QUEUE_STORE);
+          const [write, rec, writes] = await Promise.all([
+            promisify(queued.get(seq)),
+            promisify(rows.get(id)),
+            promisify(queued.getAll()),
+          ]);
+          if (!write) return "Missing";
+          if (write.table !== table || write.id !== id) {
+            throw new Error("queued write identity changed before acknowledgement");
+          }
+
+          const otherRowWrites = writes.filter(
+            (candidate) =>
+              candidate.seq !== seq &&
+              candidate.table === table &&
+              candidate.id === id,
+          );
+          const hasNewerOptimisticValue =
+            Boolean(rec?.dirty) &&
+            otherRowWrites.some((candidate) => candidate.seq > seq);
+          let outcome = "Superseded";
+          const requests = [];
+
+          for (const candidate of otherRowWrites) {
+            if (candidate.seq < seq) {
+              candidate.superseded_version = Math.max(
+                candidate.superseded_version ?? Number.MIN_SAFE_INTEGER,
+                committedVersion,
+              );
+              requests.push(promisify(queued.put(candidate)));
+            }
+          }
+
+          if (hasNewerOptimisticValue && rec) {
+            touchReplicaRecord(rec, {
+              version: Math.max(rec.version, committedVersion),
+              dirty: true,
+              synced: true,
+            });
+            requests.push(promisify(rows.put(rec)));
+          } else if (write.op === "delete") {
+            requests.push(promisify(rows.delete(id)));
+            outcome = { Adopt: committedVersion };
+          } else {
+            requests.push(
+              promisify(
+                rows.put(
+                  replicaRecord(
+                    rec,
+                    id,
+                    write.payload,
+                    committedVersion,
+                    otherRowWrites.length > 0,
+                    { synced: true },
+                  ),
+                ),
+              ),
+            );
+            outcome = { Adopt: committedVersion };
+          }
+          requests.push(promisify(queued.delete(seq)));
+          await Promise.all(requests);
+          return outcome;
         },
       );
     },

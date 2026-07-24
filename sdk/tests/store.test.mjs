@@ -26,6 +26,45 @@ test("put/get/meta round-trips a row with its version + dirty flag", async (t) =
   assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: true });
 });
 
+test("replica lifecycle timestamps survive optimistic updates and advance on sync", async (t) => {
+  const store = await freshStore();
+  const queue = makeQueue(store);
+  t.after(() => store.close());
+
+  await store.put(
+    "api_keys",
+    "k1",
+    { name: "server" },
+    { version: 2, dirty: false },
+  );
+  const initial = await store.replicaMeta("api_keys", "k1");
+  assert.ok(Number.isSafeInteger(initial.created_at_ms));
+  assert.ok(Number.isSafeInteger(initial.updated_at_ms));
+  assert.ok(Number.isSafeInteger(initial.synced_at_ms));
+
+  const seq = await queue.enqueueOptimistic(
+    {
+      id: "k1",
+      table: "api_keys",
+      op: "upsert",
+      payload: { name: "local" },
+      base_version: 2,
+    },
+    { name: "local" },
+  );
+  const dirty = await store.replicaMeta("api_keys", "k1");
+  assert.equal(dirty.created_at_ms, initial.created_at_ms);
+  assert.equal(dirty.synced_at_ms, initial.synced_at_ms);
+  assert.equal(dirty.dirty, true);
+  assert.ok(dirty.updated_at_ms >= initial.updated_at_ms);
+
+  await queue.settleAck("api_keys", "k1", seq, 3);
+  const synced = await store.replicaMeta("api_keys", "k1");
+  assert.equal(synced.version, 3);
+  assert.equal(synced.dirty, false);
+  assert.ok(synced.synced_at_ms >= initial.synced_at_ms);
+});
+
 test("setMeta adopts a new version and clears dirty; del removes", async (t) => {
   const store = await freshStore();
   t.after(() => store.close());

@@ -3,13 +3,10 @@ import 'dart:io';
 
 import 'package:fiducia_sync/fiducia_sync.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 /// The Dart HLC + schema validator must reproduce the SAME results as the Rust
 /// core (tests/shared_fixtures.rs) and JS SDK over the shared fixture files.
 void main() {
-  setUpAll(sqfliteFfiInit);
-
   Map<String, Object?> loadFixture(String name) {
     final file = File('../schema/fixtures/$name');
     expect(
@@ -148,53 +145,4 @@ void main() {
     });
     expect(violations.map((v) => v.path), contains(r'$.changes[1].version'));
   });
-
-  test(
-    'queued writes carry HLC stamps that sort after observed server time',
-    () async {
-      final store = await SqliteSyncStore.open(
-        inMemoryDatabasePath,
-        factory: databaseFactoryFfi,
-        nowMs: () => 5000,
-      );
-      final client = FiduciaSyncClient(store: store, nowMs: () => 5000);
-
-      await client.applyChange(
-        const SyncChange(
-          table: 'items',
-          operation: ChangeOperation.upsert,
-          id: 'other',
-          version: 1,
-          row: {'id': 'other'},
-          atMs: 9000,
-        ),
-      );
-      await client.optimisticWrite(
-        table: 'items',
-        id: 'one',
-        row: const {'id': 'one'},
-        send: (_) async => throw StateError('offline'),
-      );
-
-      final queued = (await store.queuedWrites()).single;
-      final stamp = HlcStamp.decode(queued.hlc!);
-      expect(stamp, isNotNull);
-      expect(stamp!.wallMs, greaterThanOrEqualTo(9000));
-      expect(await store.getHlcState(), stamp);
-
-      // A new client over the same store resumes from durable state.
-      final client2 = FiduciaSyncClient(store: store, nowMs: () => 5000);
-      await client2.optimisticWrite(
-        table: 'items',
-        id: 'two',
-        row: const {'id': 'two'},
-        send: (_) async => throw StateError('offline'),
-      );
-      final later = (await store.queuedWrites()).firstWhere(
-        (w) => w.id == 'two',
-      );
-      expect(later.hlc!.compareTo(queued.hlc!), greaterThan(0));
-      await client.close();
-    },
-  );
 }

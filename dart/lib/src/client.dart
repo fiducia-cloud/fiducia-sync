@@ -2,45 +2,98 @@ import 'dart:async';
 import 'dart:math';
 
 import 'core.dart';
-import 'hlc.dart';
 import 'models.dart';
-import 'policy.dart';
 import 'store.dart';
 import 'telemetry.dart';
 
 typedef SendWrite = Future<WriteAcknowledgement> Function(QueuedWrite write);
 typedef PullChanges = Future<PullPage> Function(int cursor, int limit);
+typedef ResolveWritePolicy = SyncWritePolicy Function(SyncWriteContext context);
 
-/// The mobile sync client: serialized reconcile decisions over a durable
-/// [SyncStore], with per-write [WritePolicy] (optimism enum, default
-/// local-first), [SyncErrorMode] (caller-facing failure channel), OpenTelemetry-
-/// adaptable [SyncTelemetry], and a device Hybrid Logical Clock that stamps
-/// queued writes and observes every incoming commit time.
 final class FiduciaSyncClient {
   FiduciaSyncClient({
     required this.store,
     String Function()? writeKeyFactory,
-    SyncTelemetry? telemetry,
-    int Function()? nowMs,
-    this.writePolicy = WritePolicy.localFirst,
-    this.errorMode = SyncErrorMode.returnResult,
-  }) : _writeKeyFactory = writeKeyFactory ?? _secureWriteKey,
-       _telemetry = safeTelemetry(telemetry),
-       _nowMs = nowMs ?? (() => DateTime.now().millisecondsSinceEpoch);
+    this.writePolicy = SyncWritePolicy.standard,
+    this.resolveWritePolicy,
+    this.telemetry,
+  }) : _writeKeyFactory = writeKeyFactory ?? _secureWriteKey;
 
   final SyncStore store;
-
-  /// Client-wide default write policy; per-write `policy:` overrides it.
-  final WritePolicy writePolicy;
-
-  /// Client-wide default error mode; per-write `errorMode:` overrides it.
-  final SyncErrorMode errorMode;
-
   final String Function() _writeKeyFactory;
-  final SyncTelemetry _telemetry;
-  final int Function() _nowMs;
+  final SyncWritePolicy writePolicy;
+  final ResolveWritePolicy? resolveWritePolicy;
+  final SyncTelemetry? telemetry;
   Future<void> _mutationTail = Future<void>.value();
-  Hlc? _clock;
+
+  SyncWritePolicy _policyFor(
+    SyncWriteContext context, [
+    SyncWritePolicy? override,
+  ]) => override ?? resolveWritePolicy?.call(context) ?? writePolicy;
+
+  bool _shouldEmit(SyncTelemetryLevel level, SyncTelemetryPhase phase) {
+    if (level == SyncTelemetryLevel.off) return false;
+    if (level == SyncTelemetryLevel.errors) {
+      return phase == SyncTelemetryPhase.failed ||
+          phase == SyncTelemetryPhase.retryScheduled;
+    }
+    return true;
+  }
+
+  SyncTelemetryContext _telemetryContext(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+  ) => SyncTelemetryContext(
+    table: context.table,
+    operation: context.operation,
+    strategy: policy.strategy,
+  );
+
+  SyncTelemetrySpan? _beginTelemetry(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+  ) {
+    if (policy.telemetry != SyncTelemetryLevel.lifecycle &&
+        policy.telemetry != SyncTelemetryLevel.verbose) {
+      return null;
+    }
+    try {
+      return telemetry?.startWrite(_telemetryContext(context, policy));
+    } on Object {
+      return null;
+    }
+  }
+
+  void _reportTelemetry(
+    SyncWriteContext context,
+    SyncWritePolicy policy,
+    SyncTelemetryPhase phase, {
+    int? attempts,
+    String? errorType,
+    SyncTelemetrySpan? span,
+  }) {
+    if (!_shouldEmit(policy.telemetry, phase)) return;
+    final event = SyncTelemetryEvent(
+      phase: phase,
+      strategy: policy.strategy,
+      table: context.table,
+      operation: context.operation,
+      atMs: DateTime.now().millisecondsSinceEpoch,
+      attempts: attempts,
+      errorType: errorType,
+    );
+    try {
+      telemetry?.emit(event, _telemetryContext(context, policy));
+      final attributes = <String, Object>{};
+      if (attempts != null) {
+        attributes['fiducia.sync.attempts'] = attempts;
+      }
+      if (errorType != null) attributes['error.type'] = errorType;
+      span?.event(phase, attributes);
+    } on Object {
+      // Telemetry must never affect durable write behavior.
+    }
+  }
 
   Future<T> _mutate<T>(Future<T> Function() operation) {
     final result = Completer<T>();
@@ -60,67 +113,8 @@ final class FiduciaSyncClient {
     return result.future;
   }
 
-  /// The device HLC, restored lazily from durable store state.
-  Future<Hlc> _hlc() async {
-    if (_clock case final clock?) return clock;
-    HlcStamp? state;
-    try {
-      state = await store.getHlcState();
-    } on Object {
-      state = null;
-    }
-    return _clock ??= Hlc(state: state, nowMs: _nowMs);
-  }
-
-  void _emit(
-    String name, {
-    required int startedAtMs,
-    Map<String, Object?> attributes = const {},
-    Object? error,
-  }) {
-    _telemetry(
-      SyncTelemetryEvent(
-        name: name,
-        atMs: startedAtMs,
-        durationMs: max(0, _nowMs() - startedAtMs),
-        attributes: attributes,
-        error: error,
-      ),
-    );
-  }
-
-  Future<String> applyChange(SyncChange event) async {
-    (await _hlc()).observe(event.atMs);
-    final startedAt = _nowMs();
-    final attributes = <String, Object?>{
-      'sync.table': event.table,
-      'sync.row_id': event.id,
-      'sync.op': event.operation.name,
-    };
-    try {
-      final outcome = await _mutate(() => _applyChange(event));
-      _emit(
-        'fiducia.sync.apply',
-        startedAtMs: startedAt,
-        attributes: {...attributes, 'sync.outcome': outcome},
-      );
-      if (outcome == 'conflict-resolved') {
-        _emit(
-          'fiducia.sync.conflict',
-          startedAtMs: startedAt,
-          attributes: {...attributes, 'sync.resolution': 'server-wins'},
-        );
-      }
-      return outcome;
-    } on Object catch (error) {
-      _emit(
-        'fiducia.sync.apply',
-        startedAtMs: startedAt,
-        attributes: attributes,
-        error: error,
-      );
-      rethrow;
-    }
+  Future<String> applyChange(SyncChange event) {
+    return _mutate(() => _applyChange(event));
   }
 
   Future<String> _applyChange(SyncChange event) async {
@@ -164,6 +158,21 @@ final class FiduciaSyncClient {
               .whereType<int>()
               .toList(growable: false),
         );
+        final context = SyncWriteContext(
+          table: event.table,
+          operation: event.operation,
+          mutation: SyncMutationMode.replace,
+        );
+        try {
+          final policy = _policyFor(context);
+          _reportTelemetry(
+            context,
+            policy,
+            SyncTelemetryPhase.conflictResolved,
+          );
+        } on Object {
+          // A telemetry-policy resolver cannot undo a durable conflict.
+        }
         return 'conflict-resolved';
       case ReconcileKind.ignore:
         if (decision.ignoreReason == IgnoreReason.alreadyApplied &&
@@ -193,252 +202,177 @@ final class FiduciaSyncClient {
     }
   }
 
-  /// Perform one write under a [WritePolicy] (default: the client's):
-  ///
-  ///   localOnly    mutate + enqueue durably; no network now (flushQueue later)
-  ///   localFirst   mutate + enqueue durably, then send; failures stay queued
-  ///   serverFirst  send first; adopt the committed state locally on ack
-  ///   serverOnly   send only; the local store waits for the echo/catch-up
-  ///
-  /// The [SyncErrorMode] picks the caller-facing channel for SEND failures:
-  /// `returnResult` resolves a queued/failed result, `throwError` throws a
-  /// typed [SyncWriteException], `emitOnly` resolves quietly (telemetry still
-  /// sees everything). Durability failures always throw. `send` may be null
-  /// only for [WritePolicy.localOnly].
-  Future<OptimisticWriteResult> optimisticWrite({
+  Future<OptimisticWriteResult> write({
     required String table,
     required String id,
     required JsonMap? row,
     SendWrite? send,
     ChangeOperation operation = ChangeOperation.upsert,
-    bool merge = false,
-    WritePolicy? policy,
-    SyncErrorMode? errorMode,
+    SyncMutationMode mutation = SyncMutationMode.replace,
+    SyncWritePolicy? policy,
   }) async {
-    final resolvedPolicy = policy ?? writePolicy;
-    final mode = errorMode ?? this.errorMode;
-    if (resolvedPolicy.sendsImmediately && send == null) {
-      throw ArgumentError.value(
-        send,
-        'send',
-        'write policy ${resolvedPolicy.wireName} requires a send function',
+    final context = SyncWriteContext(
+      table: table,
+      operation: operation,
+      mutation: mutation,
+    );
+    final resolvedPolicy = _policyFor(context, policy);
+    if (resolvedPolicy.strategy != SyncWriteStrategy.localQueue &&
+        send == null) {
+      throw ArgumentError(
+        '${resolvedPolicy.strategy.wireName} writes require a send callback',
       );
     }
-    final startedAt = _nowMs();
-    final attributes = <String, Object?>{
-      'sync.table': table,
-      'sync.row_id': id,
-      'sync.op': operation.name,
-      'sync.policy': resolvedPolicy.wireName,
-      'sync.error_mode': mode.wireName,
-    };
-    OptimisticWriteResult finish(OptimisticWriteResult result) {
-      _emit(
-        'fiducia.sync.write',
-        startedAtMs: startedAt,
-        attributes: {
-          ...attributes,
-          'sync.outcome': result.status.name,
-          if (result.attempts != null) 'sync.attempts': result.attempts,
-        },
-        error: result.error,
-      );
-      return result;
-    }
-
-    Never fail(SyncWriteException error) {
-      _emit(
-        'fiducia.sync.write',
-        startedAtMs: startedAt,
-        attributes: {...attributes, 'sync.outcome': 'threw'},
-        error: error,
-      );
-      throw error;
-    }
-
-    final clock = await _hlc();
-
-    if (resolvedPolicy.enqueuesDurably) {
-      final queued = await _mutate(() async {
-        final local = await store.read(table, id);
-        final payload = switch (operation) {
-          ChangeOperation.delete => null,
-          ChangeOperation.upsert when merge => deepMerge(
-            local?.row ?? const <String, Object?>{},
-            row ?? const {},
-          ),
-          ChangeOperation.upsert =>
-            row ??
-                (throw const FormatException(
-                  'optimistic upsert must carry a row',
-                )),
-        };
-        final stamp = clock.tick();
-        final write = QueuedWrite(
-          id: id,
-          table: table,
-          operation: operation,
-          payload: payload,
-          baseVersion: local?.metadata.version ?? 0,
-          key: _writeKeyFactory(),
-          hlc: stamp.encoded,
-        );
-        final sequence = await store.enqueueOptimistic(
-          write,
-          payload,
-          hlcState: clock.state,
-        );
-        return write.copyWith(sequence: sequence);
-      });
-
-      if (resolvedPolicy == WritePolicy.localOnly) {
-        return finish(OptimisticWriteResult.queued(attempts: 0));
-      }
-
-      try {
-        final acknowledgement = await send!(queued);
-        _validateAcknowledgement(queued, acknowledgement);
-        final settlement = await _mutate(
-          () => store.settleAcknowledgement(
-            table,
-            id,
-            queued.sequence!,
-            acknowledgement.committedVersion,
-          ),
-        );
-        return finish(OptimisticWriteResult.acknowledged(settlement.version));
-      } on Object catch (error) {
-        final int attempts;
-        try {
-          attempts = await _mutate(() => store.bumpAttempts(queued.sequence!));
-        } on Object catch (storageError) {
-          fail(
-            SyncWriteException(
-              'sync write failed and retry state was not durable',
-              write: queued,
-              policy: resolvedPolicy,
-              queued: false,
-              cause: storageError,
-            ),
-          );
-        }
-        if (attempts == 0) return finish(OptimisticWriteResult.acknowledged());
-        switch (mode) {
-          case SyncErrorMode.throwError:
-            fail(
-              SyncWriteException(
-                'sync write failed and stays queued for retry',
-                write: queued,
-                policy: resolvedPolicy,
-                attempts: attempts,
-                queued: true,
-                cause: error,
-              ),
-            );
-          case SyncErrorMode.emitOnly:
-            return finish(OptimisticWriteResult.queued(attempts: attempts));
-          case SyncErrorMode.returnResult:
-            return finish(
-              OptimisticWriteResult.queued(attempts: attempts, error: error),
-            );
-        }
-      }
-    }
-
-    // Pessimistic policies: no local mutation, no durable queue entry.
-    final write = await _mutate(() async {
+    final span = _beginTelemetry(context, resolvedPolicy);
+    final queued = await _mutate(() async {
       final local = await store.read(table, id);
       final payload = switch (operation) {
         ChangeOperation.delete => null,
-        ChangeOperation.upsert when merge => deepMerge(
-          local?.row ?? const <String, Object?>{},
-          row ?? const {},
-        ),
+        ChangeOperation.upsert when mutation == SyncMutationMode.merge =>
+          deepMerge(local?.row ?? const <String, Object?>{}, row ?? const {}),
         ChangeOperation.upsert =>
           row ??
               (throw const FormatException(
                 'optimistic upsert must carry a row',
               )),
       };
-      return QueuedWrite(
+      final write = QueuedWrite(
         id: id,
         table: table,
         operation: operation,
         payload: payload,
         baseVersion: local?.metadata.version ?? 0,
         key: _writeKeyFactory(),
-        hlc: clock.tick().encoded,
+        writePolicy: resolvedPolicy,
       );
+      final sequence = resolvedPolicy.strategy == SyncWriteStrategy.pessimistic
+          ? await store.enqueue(write)
+          : await store.enqueueOptimistic(write, payload);
+      return write.copyWith(sequence: sequence);
     });
-    // Best-effort HLC persistence (no queue transaction to ride along with).
-    unawaited(
-      Future.sync(() => store.setHlcState(clock.state)).catchError((_) {}),
+    _reportTelemetry(
+      context,
+      resolvedPolicy,
+      SyncTelemetryPhase.localQueued,
+      span: span,
     );
 
+    if (resolvedPolicy.strategy == SyncWriteStrategy.localQueue) {
+      span?.end();
+      return OptimisticWriteResult.queued(attempts: 0);
+    }
     try {
-      final acknowledgement = await send!(write);
-      _validateAcknowledgement(write, acknowledgement);
-      if (resolvedPolicy == WritePolicy.serverFirst) {
-        await _mutate(() => _adoptServerAck(write, acknowledgement));
-      }
-      return finish(
-        OptimisticWriteResult.acknowledged(acknowledgement.committedVersion),
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.sendStarted,
+        span: span,
       );
+      final acknowledgement = await send!(queued);
+      _validateAcknowledgement(queued, acknowledgement);
+      final settlement = await _mutate(
+        () => resolvedPolicy.strategy == SyncWriteStrategy.pessimistic
+            ? store.settlePessimistic(
+                table,
+                id,
+                queued.sequence!,
+                acknowledgement.committedVersion,
+              )
+            : store.settleAcknowledgement(
+                table,
+                id,
+                queued.sequence!,
+                acknowledgement.committedVersion,
+              ),
+      );
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.acknowledged,
+        span: span,
+      );
+      span?.end();
+      return OptimisticWriteResult.acknowledged(settlement.version);
     } on Object catch (error) {
-      switch (mode) {
-        case SyncErrorMode.throwError:
-          fail(
-            SyncWriteException(
-              'sync write failed and was not applied locally',
-              write: write,
-              policy: resolvedPolicy,
-              queued: false,
-              cause: error,
-            ),
-          );
-        case SyncErrorMode.emitOnly:
-          return finish(OptimisticWriteResult.failed());
-        case SyncErrorMode.returnResult:
-          return finish(OptimisticWriteResult.failed(error: error));
+      final attempts = await _mutate(
+        () => store.bumpAttempts(queued.sequence!),
+      );
+      if (attempts == 0) {
+        _reportTelemetry(
+          context,
+          resolvedPolicy,
+          SyncTelemetryPhase.acknowledged,
+          span: span,
+        );
+        span?.end();
+        return OptimisticWriteResult.acknowledged();
       }
+      final result = OptimisticWriteResult.queued(
+        attempts: attempts,
+        error: resolvedPolicy.failureMode == SyncFailureMode.emitOnly
+            ? null
+            : error,
+      );
+      final errorType = error.runtimeType.toString();
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.failed,
+        attempts: attempts,
+        errorType: errorType,
+        span: span,
+      );
+      _reportTelemetry(
+        context,
+        resolvedPolicy,
+        SyncTelemetryPhase.retryScheduled,
+        attempts: attempts,
+        errorType: errorType,
+        span: span,
+      );
+      try {
+        span?.error(errorType);
+        span?.end();
+      } on Object {
+        // Observability is best-effort.
+      }
+      if (resolvedPolicy.failureMode == SyncFailureMode.throwError) {
+        throw SyncWriteException(cause: error, result: result, write: queued);
+      }
+      return result;
     }
   }
 
-  /// Directly adopt a server-first ack when nothing newer landed locally.
-  Future<void> _adoptServerAck(
-    QueuedWrite write,
-    WriteAcknowledgement acknowledgement,
-  ) async {
-    final local = await store.read(write.table, write.id);
-    if (local != null &&
-        local.metadata.version > acknowledgement.committedVersion) {
-      return; // superseded by newer local state
-    }
-    final stillDirty = (await store.queuedWrites()).any(
-      (queued) => queued.table == write.table && queued.id == write.id,
+  Future<OptimisticWriteResult> optimisticWrite({
+    required String table,
+    required String id,
+    required JsonMap? row,
+    required SendWrite send,
+    ChangeOperation operation = ChangeOperation.upsert,
+    bool merge = false,
+  }) {
+    final context = SyncWriteContext(
+      table: table,
+      operation: operation,
+      mutation: merge ? SyncMutationMode.merge : SyncMutationMode.replace,
     );
-    if (write.operation == ChangeOperation.delete) {
-      await store.delete(write.table, write.id);
-    } else {
-      await store.put(
-        write.table,
-        write.id,
-        write.payload ?? const {},
-        LocalRowMetadata(
-          version: acknowledgement.committedVersion,
-          dirty: stillDirty,
-          syncedAtMs: _nowMs(),
-        ),
-      );
-    }
+    return write(
+      table: table,
+      id: id,
+      row: row,
+      send: send,
+      operation: operation,
+      mutation: context.mutation,
+      policy: _policyFor(
+        context,
+      ).copyWith(strategy: SyncWriteStrategy.optimistic),
+    );
   }
 
   Future<OptimisticWriteResult> optimisticDelete({
     required String table,
     required String id,
     required SendWrite send,
-    WritePolicy? policy,
-    SyncErrorMode? errorMode,
   }) {
     return optimisticWrite(
       table: table,
@@ -446,8 +380,6 @@ final class FiduciaSyncClient {
       row: null,
       send: send,
       operation: ChangeOperation.delete,
-      policy: policy,
-      errorMode: errorMode,
     );
   }
 
@@ -456,8 +388,6 @@ final class FiduciaSyncClient {
     required String id,
     required JsonMap patch,
     required SendWrite send,
-    WritePolicy? policy,
-    SyncErrorMode? errorMode,
   }) {
     return optimisticWrite(
       table: table,
@@ -465,18 +395,10 @@ final class FiduciaSyncClient {
       row: patch,
       send: send,
       merge: true,
-      policy: policy,
-      errorMode: errorMode,
     );
   }
 
-  /// Re-send everything still queued (call on reconnect). Failures throw a
-  /// [QueueFlushException] — unless `errorMode` (per-call, else the client
-  /// default) is [SyncErrorMode.emitOnly], which resolves the flushed count
-  /// and reports failures only through telemetry.
-  Future<int> flushQueue(SendWrite send, {SyncErrorMode? errorMode}) async {
-    final mode = errorMode ?? this.errorMode;
-    final startedAt = _nowMs();
+  Future<int> flushQueue(SendWrite send) async {
     var flushed = 0;
     final failures = <Object>[];
     final writes = await _mutate(store.queuedWrites);
@@ -487,12 +409,19 @@ final class FiduciaSyncClient {
         final acknowledgement = await send(write);
         _validateAcknowledgement(write, acknowledgement);
         await _mutate(
-          () => store.settleAcknowledgement(
-            write.table,
-            write.id,
-            sequence,
-            acknowledgement.committedVersion,
-          ),
+          () => write.writePolicy.strategy == SyncWriteStrategy.pessimistic
+              ? store.settlePessimistic(
+                  write.table,
+                  write.id,
+                  sequence,
+                  acknowledgement.committedVersion,
+                )
+              : store.settleAcknowledgement(
+                  write.table,
+                  write.id,
+                  sequence,
+                  acknowledgement.committedVersion,
+                ),
         );
         flushed += 1;
       } on Object catch (error) {
@@ -504,13 +433,7 @@ final class FiduciaSyncClient {
         }
       }
     }
-    _emit(
-      'fiducia.sync.flush',
-      startedAtMs: startedAt,
-      attributes: {'sync.flushed': flushed, 'sync.failures': failures.length},
-      error: failures.isEmpty ? null : failures.first,
-    );
-    if (failures.isNotEmpty && mode != SyncErrorMode.emitOnly) {
+    if (failures.isNotEmpty) {
       throw QueueFlushException(flushed: flushed, failures: failures);
     }
     return flushed;
@@ -524,42 +447,24 @@ final class FiduciaSyncClient {
     if (pageSize < 1 || pageSize > 1000) {
       throw RangeError.range(pageSize, 1, 1000, 'pageSize');
     }
-    final startedAt = _nowMs();
     var cursor = await _mutate(() => store.getCursor(cursorScope));
     var applied = 0;
-    try {
-      for (var pageNumber = 0; pageNumber < 10000; pageNumber += 1) {
-        final page = await fetch(cursor, pageSize);
-        if (page.nextCursor < cursor ||
-            ((page.hasMore || page.changes.isNotEmpty) &&
-                page.nextCursor == cursor)) {
-          throw StateError('incremental sync cursor made no progress');
-        }
-        for (final change in page.changes) {
-          await applyChange(change);
-          applied += 1;
-        }
-        await _mutate(() => store.setCursor(page.nextCursor, cursorScope));
-        cursor = page.nextCursor;
-        if (!page.hasMore) {
-          _emit(
-            'fiducia.sync.pull',
-            startedAtMs: startedAt,
-            attributes: {'sync.applied': applied, 'sync.scope': cursorScope},
-          );
-          return applied;
-        }
+    for (var pageNumber = 0; pageNumber < 10000; pageNumber += 1) {
+      final page = await fetch(cursor, pageSize);
+      if (page.nextCursor < cursor ||
+          ((page.hasMore || page.changes.isNotEmpty) &&
+              page.nextCursor == cursor)) {
+        throw StateError('incremental sync cursor made no progress');
       }
-      throw StateError('incremental sync exceeded the catch-up page limit');
-    } on Object catch (error) {
-      _emit(
-        'fiducia.sync.pull',
-        startedAtMs: startedAt,
-        attributes: {'sync.scope': cursorScope},
-        error: error,
-      );
-      rethrow;
+      for (final change in page.changes) {
+        await applyChange(change);
+        applied += 1;
+      }
+      await _mutate(() => store.setCursor(page.nextCursor, cursorScope));
+      cursor = page.nextCursor;
+      if (!page.hasMore) return applied;
     }
+    throw StateError('incremental sync exceeded the catch-up page limit');
   }
 
   Future<void> close() async {
