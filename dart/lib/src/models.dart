@@ -81,10 +81,20 @@ final class SyncChange {
 }
 
 final class LocalRowMetadata {
-  const LocalRowMetadata({required this.version, required this.dirty});
+  const LocalRowMetadata({
+    required this.version,
+    required this.dirty,
+    this.syncedAtMs,
+  });
 
   final int version;
   final bool dirty;
+
+  /// When THIS device last adopted server-authoritative state for the row
+  /// (local wall clock, Unix ms); null until it has. Optimistic dirty writes
+  /// preserve the previous stamp — editing on top of synced state does not
+  /// un-sync it.
+  final int? syncedAtMs;
 }
 
 final class QueuedWrite {
@@ -98,6 +108,7 @@ final class QueuedWrite {
     this.sequence,
     this.attempts = 0,
     this.supersededVersion,
+    this.hlc,
   });
 
   final int? sequence;
@@ -110,6 +121,10 @@ final class QueuedWrite {
   final int attempts;
   final int? supersededVersion;
 
+  /// Device-monotonic Hybrid Logical Clock stamp minted when the write was
+  /// queued (see hlc.dart). Advisory local metadata — never sent on the wire.
+  final String? hlc;
+
   QueuedWrite copyWith({int? sequence, int? attempts, int? supersededVersion}) {
     return QueuedWrite(
       sequence: sequence ?? this.sequence,
@@ -121,6 +136,7 @@ final class QueuedWrite {
       key: key,
       attempts: attempts ?? this.attempts,
       supersededVersion: supersededVersion ?? this.supersededVersion,
+      hlc: hlc,
     );
   }
 
@@ -134,6 +150,7 @@ final class QueuedWrite {
     if (key != null) 'key': key,
     'attempts': attempts,
     if (supersededVersion != null) 'superseded_version': supersededVersion,
+    if (hlc != null) 'hlc': hlc,
   };
 
   /// Strict `fiducia-interfaces` wire envelope without local queue metadata.
@@ -211,30 +228,40 @@ final class PullPage {
   }
 }
 
+/// Terminal state of one optimistic write call. `failed` only occurs under
+/// the pessimistic server-* policies (nothing was queued or applied locally).
+enum WriteStatus { acked, queued, failed }
+
 final class OptimisticWriteResult {
   const OptimisticWriteResult._({
-    required this.acknowledged,
+    required this.status,
     this.version,
     this.attempts,
     this.error,
   });
 
   factory OptimisticWriteResult.acknowledged([int? version]) =>
-      OptimisticWriteResult._(acknowledged: true, version: version);
+      OptimisticWriteResult._(status: WriteStatus.acked, version: version);
 
   factory OptimisticWriteResult.queued({
     required int attempts,
-    required Object error,
+    Object? error,
   }) => OptimisticWriteResult._(
-    acknowledged: false,
+    status: WriteStatus.queued,
     attempts: attempts,
     error: error,
   );
 
-  final bool acknowledged;
+  factory OptimisticWriteResult.failed({Object? error}) =>
+      OptimisticWriteResult._(status: WriteStatus.failed, error: error);
+
+  final WriteStatus status;
   final int? version;
   final int? attempts;
   final Object? error;
+
+  /// Back-compat alias: true when the server confirmed the write.
+  bool get acknowledged => status == WriteStatus.acked;
 }
 
 int _requiredInt(Object? value, String field) {

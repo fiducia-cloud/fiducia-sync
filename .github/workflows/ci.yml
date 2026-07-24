@@ -81,6 +81,7 @@ jobs:
         working-directory: sdk
         run: |
           npm ci --ignore-scripts
+          node scripts/embed-sync-schema.mjs --check
           npm run typecheck
           node --test tests/*.test.mjs
           npm pack --dry-run

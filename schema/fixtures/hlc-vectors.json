@@ -1,0 +1,41 @@
+{
+  "description": "Cross-language Hybrid Logical Clock vectors. Each case seeds a clock from `start`, applies `steps` in order, and asserts the canonical encoded stamp after every step. Rust (src/hlc.rs), JS (sdk/src/hlc.mjs), and Dart (dart/lib/src/hlc.dart) must all reproduce these exactly.",
+  "cases": [
+    {
+      "name": "tick advances with the wall clock and counts within one millisecond",
+      "start": { "wall_ms": 0, "counter": 0 },
+      "steps": [
+        { "op": "tick", "now_ms": 100, "expect": "000000000064-0000" },
+        { "op": "tick", "now_ms": 101, "expect": "000000000065-0000" },
+        { "op": "tick", "now_ms": 101, "expect": "000000000065-0001" },
+        { "op": "tick", "now_ms": 99, "expect": "000000000065-0002" }
+      ]
+    },
+    {
+      "name": "observe jumps strictly past a future server commit and stays there",
+      "start": { "wall_ms": 0, "counter": 0 },
+      "steps": [
+        { "op": "tick", "now_ms": 1000, "expect": "0000000003e8-0000" },
+        { "op": "observe", "remote_ms": 5000, "now_ms": 1001, "expect": "000000001388-0001" },
+        { "op": "tick", "now_ms": 1002, "expect": "000000001388-0002" },
+        { "op": "observe", "remote_ms": 5000, "now_ms": 1003, "expect": "000000001388-0003" },
+        { "op": "observe", "remote_ms": 4000, "now_ms": 6000, "expect": "000000001770-0000" }
+      ]
+    },
+    {
+      "name": "counter overflow rolls the wall forward one millisecond",
+      "start": { "wall_ms": 2000, "counter": 65535 },
+      "steps": [
+        { "op": "tick", "now_ms": 1500, "expect": "0000000007d1-0000" }
+      ]
+    },
+    {
+      "name": "hostile negative clocks clamp to zero and never move backwards",
+      "start": { "wall_ms": 0, "counter": 0 },
+      "steps": [
+        { "op": "tick", "now_ms": -5, "expect": "000000000000-0001" },
+        { "op": "observe", "remote_ms": -10, "now_ms": -10, "expect": "000000000000-0002" }
+      ]
+    }
+  ]
+}

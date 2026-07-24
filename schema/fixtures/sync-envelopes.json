@@ -1,0 +1,175 @@
+{
+  "description": "Cross-language validation fixtures for the canonical sync envelopes. Every runtime (Rust core, JS SDK, Dart package) runs each case against the vendored schema/sync.schema.json and must agree on valid/invalid.",
+  "cases": [
+    {
+      "name": "change event upsert with every optional field",
+      "definition": "SyncChangeEvent",
+      "valid": true,
+      "value": {
+        "table": "api_keys",
+        "op": "upsert",
+        "id": "k1",
+        "version": 4,
+        "row": { "name": "prod", "nested": { "deep": [1, 2, 3] } },
+        "at_ms": 1721000000000,
+        "write_key": "w-1",
+        "sync_sequence": 99
+      }
+    },
+    {
+      "name": "change event delete with null row",
+      "definition": "SyncChangeEvent",
+      "valid": true,
+      "value": { "table": "api_keys", "op": "delete", "id": "k1", "version": 5, "row": null, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects an unknown op",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "merge", "id": "k1", "version": 5, "row": null, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects a missing at_ms",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": 5, "row": {} }
+    },
+    {
+      "name": "change event rejects a negative version",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": -1, "row": {}, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects a version beyond the JS safe range",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": 9007199254740992, "row": {}, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects a fractional version",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": 1.5, "row": {}, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects an empty table",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "", "op": "upsert", "id": "k1", "version": 1, "row": {}, "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects an array row",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": 1, "row": [1, 2], "at_ms": 0 }
+    },
+    {
+      "name": "change event rejects an undeclared extra field",
+      "definition": "SyncChangeEvent",
+      "valid": false,
+      "value": { "table": "api_keys", "op": "upsert", "id": "k1", "version": 1, "row": {}, "at_ms": 0, "synced_at": 1 }
+    },
+    {
+      "name": "queued write upsert",
+      "definition": "SyncQueuedWrite",
+      "valid": true,
+      "value": { "id": "k1", "table": "api_keys", "op": "upsert", "payload": { "name": "prod" }, "base_version": 0, "key": "w-abc" }
+    },
+    {
+      "name": "queued write delete with null payload",
+      "definition": "SyncQueuedWrite",
+      "valid": true,
+      "value": { "id": "k1", "table": "api_keys", "op": "delete", "payload": null, "base_version": 7, "key": "w-abc" }
+    },
+    {
+      "name": "queued write rejects a missing key",
+      "definition": "SyncQueuedWrite",
+      "valid": false,
+      "value": { "id": "k1", "table": "api_keys", "op": "upsert", "payload": {}, "base_version": 0 }
+    },
+    {
+      "name": "queued write rejects an empty key",
+      "definition": "SyncQueuedWrite",
+      "valid": false,
+      "value": { "id": "k1", "table": "api_keys", "op": "upsert", "payload": {}, "base_version": 0, "key": "" }
+    },
+    {
+      "name": "queued write rejects a key longer than 256 characters",
+      "definition": "SyncQueuedWrite",
+      "valid": false,
+      "value": { "id": "k1", "table": "api_keys", "op": "upsert", "payload": {}, "base_version": 0, "key": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk" }
+    },
+    {
+      "name": "queued write rejects a string base_version",
+      "definition": "SyncQueuedWrite",
+      "valid": false,
+      "value": { "id": "k1", "table": "api_keys", "op": "upsert", "payload": {}, "base_version": "0", "key": "w-abc" }
+    },
+    {
+      "name": "acknowledgement",
+      "definition": "SyncWriteAcknowledgement",
+      "valid": true,
+      "value": { "id": "k1", "committed_version": 8 }
+    },
+    {
+      "name": "acknowledgement rejects extra fields",
+      "definition": "SyncWriteAcknowledgement",
+      "valid": false,
+      "value": { "id": "k1", "committed_version": 8, "note": "hi" }
+    },
+    {
+      "name": "acknowledgement rejects a boolean committed_version",
+      "definition": "SyncWriteAcknowledgement",
+      "valid": false,
+      "value": { "id": "k1", "committed_version": true }
+    },
+    {
+      "name": "pull page with nested change events",
+      "definition": "SyncPullPage",
+      "valid": true,
+      "value": {
+        "changes": [
+          { "table": "api_keys", "op": "upsert", "id": "k1", "version": 1, "row": {}, "at_ms": 5, "sync_sequence": 1 },
+          { "table": "api_keys", "op": "delete", "id": "k2", "version": 2, "row": null, "at_ms": 6, "sync_sequence": 2 }
+        ],
+        "next_cursor": 2,
+        "has_more": false
+      }
+    },
+    {
+      "name": "empty pull page",
+      "definition": "SyncPullPage",
+      "valid": true,
+      "value": { "changes": [], "next_cursor": 0, "has_more": false }
+    },
+    {
+      "name": "pull page rejects an invalid nested change",
+      "definition": "SyncPullPage",
+      "valid": false,
+      "value": {
+        "changes": [{ "table": "api_keys", "op": "upsert", "id": "k1", "version": 1, "row": {}, "at_ms": -3 }],
+        "next_cursor": 1,
+        "has_more": false
+      }
+    },
+    {
+      "name": "pull page rejects a non-array changes",
+      "definition": "SyncPullPage",
+      "valid": false,
+      "value": { "changes": {}, "next_cursor": 0, "has_more": false }
+    },
+    {
+      "name": "pull page rejects a string has_more",
+      "definition": "SyncPullPage",
+      "valid": false,
+      "value": { "changes": [], "next_cursor": 0, "has_more": "no" }
+    },
+    {
+      "name": "non-object values are rejected for object definitions",
+      "definition": "SyncWriteAcknowledgement",
+      "valid": false,
+      "value": "not-an-object"
+    }
+  ]
+}

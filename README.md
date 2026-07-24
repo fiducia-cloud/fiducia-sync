@@ -30,15 +30,26 @@ browser IO:
 
 ```
 fiducia-sync
-├── fiducia-sync-core (Rust)         # reconcile(), resolve_conflict(), on_ack(), QueuedWrite
+├── fiducia-sync-core (Rust)         # reconcile(), resolve_conflict(), on_ack(), QueuedWrite,
+│     │                              #   WritePolicy/ErrorMode enums, Hlc, SchemaValidator
 │     └── wasm-bindgen  → sdk/pkg/   # npm-contained wasm + JS glue
+├── schema/                          # vendored canonical sync.schema.json (byte-identical to
+│   └── fixtures/                    #   fiducia-interfaces) + cross-language test fixtures
 ├── crates/postgres/                 # SeaORM adapter for the shared change journal
 ├── sql/postgres/                    # idempotent Postgres migration + PostgREST RPC
-├── dart/                            # Flutter package: SQLite + Supabase
+│                                    #   + install_timestamps (monotonic updated_at)
+├── dart/                            # Flutter package: SQLite + Supabase (+ policy/telemetry/
+│                                    #   hlc/schema mirrors)
 └── sdk/src/                         # @fiducia/sync browser package
     ├── store.mjs       # IndexedDB persistence + the durable write-queue (per-plane DB,
     │                   #   safe version upgrades add tables without losing rows/queue)
+    ├── webstorage.mjs  # localStorage/sessionStorage fallback store+queue (same contracts)
     ├── client.mjs      # applyChange / optimisticWrite / optimisticDelete / flushQueue / hydrate
+    ├── policy.mjs      # WritePolicy + ErrorMode enums, SyncWriteError
+    ├── telemetry.mjs   # OpenTelemetry-adaptable event sink (zero deps)
+    ├── hlc.mjs         # Hybrid Logical Clock (device-monotonic stamps)
+    ├── validate.mjs    # JSON-Schema subset validator + zodSchemas(z) factory
+    ├── sync-schema.mjs # GENERATED embed of schema/sync.schema.json
     ├── start.mjs       # startSync() — wire BOTH transports into one client (see below)
     ├── core.mjs        # wraps the wasm ABI (JSON in/out) as object-in/out JS
     ├── transports/
@@ -49,6 +60,68 @@ fiducia-sync
                         #   write IndexedDB (instant DOM) → enqueue → POST backend
                         #   → reconcile on ack; offline-capable
 ```
+
+## Write policies and error modes (enums, not booleans)
+
+Every write takes a **policy** — how optimistic it is — and an **error mode** —
+which channel a send failure reaches the caller on. Both are shared, canonical
+enums (Rust `src/policy.rs`, JS `policy.mjs`, Dart `policy.dart`; same
+kebab-case wire names everywhere):
+
+| policy | local mutate first | durable queue | sends now | ack adopts locally |
+|---|---|---|---|---|
+| `local-only`   | yes | yes | no  | — (flushed later) |
+| `local-first`  | yes | yes | yes | via queue settlement |
+| `server-first` | no  | no  | yes | direct, version-guarded |
+| `server-only`  | no  | no  | yes | no (echo/catch-up lands it) |
+
+`local-first` is the default and the SDK's historical behavior. Error modes:
+`return` (failure encoded in the result — default), `throw` (typed
+`SyncWriteError`/`SyncWriteException`; a `local-*` write stays durably queued),
+`emit` (resolve quietly; telemetry/status hooks still see everything).
+Durability failures always throw regardless of mode.
+
+```js
+await sync.client.optimisticWrite("notes", id, row, sync.send, {
+  policy: "server-first",   // pessimistic: apply locally only after the ack
+  errorMode: "throw",
+});
+```
+
+Defaults can be set client-wide (`startSync({ writePolicy, errorMode })`, the
+Dart constructor) and overridden per write.
+
+## Telemetry (OpenTelemetry-compatible, zero dependencies)
+
+`startSync({ telemetry })` / `makeSyncClient({ telemetry })` / the Dart
+`FiduciaSyncClient(telemetry: …)` accept an event sink observing every
+operation — `fiducia.sync.write|apply|flush|pull|hydrate|conflict|status`
+events with OTel-style attributes (`sync.table`, `sync.policy`,
+`sync.outcome`, `sync.attempts`, durations, errors). `otelTelemetry({tracer,
+logger})` adapts the events onto an injected `@opentelemetry/api` tracer as
+spans — the SDK itself never depends on the OTel package, and a throwing sink
+can never corrupt sync state. Telemetry always sees failures regardless of the
+write's error mode.
+
+## Timestamps and the Hybrid Logical Clock
+
+Server-side, `fiducia_sync.install_timestamps(table)` makes `updated_at`
+strictly monotonic per row (a stepped-back clock can never regress it) and
+`created_at` immutable. Client-side, every store records `synced_at` — per row
+(`meta().syncedAtMs`: when THIS device last adopted server truth) and per plane
+(`store.syncInfo(scope)` → `{cursor, lastSyncedAtMs}` for "Last synced 2m ago"
+UI). A cross-runtime HLC stamps queued writes so a device's offline edit order
+survives clock skew. See [docs/timestamps.md](docs/timestamps.md).
+
+## Cross-language schema validation
+
+The canonical envelope schema (vendored from fiducia-interfaces at
+`schema/sync.schema.json`) drives runtime validation in all three languages —
+`SchemaValidator::sync()` (Rust), `makeValidator()`/`assertSyncEnvelope()` and
+`zodSchemas(z)` (TS/JS, `@fiducia/sync/validate`), `SchemaValidator.sync()`
+(Dart) — all pinned to the shared fixtures in `schema/fixtures/` and all
+failing closed on unsupported keywords. The same engines validate app-defined
+row/ORM schemas. See [docs/validation.md](docs/validation.md).
 
 ## Ordering: row versions and the catch-up cursor
 
@@ -262,27 +335,38 @@ See `docs/README.md`.
 ## Status
 
 - ✅ `fiducia-sync-core` — reconcile, token-aware echo rules, and total version
-  handling, covered by unit and public-API integration tests.
+  handling, covered by unit and public-API integration tests; plus the
+  canonical `WritePolicy`/`ErrorMode` enums, the HLC, and the fail-closed
+  schema-subset validator, pinned to `schema/fixtures/`.
 - ✅ wasm-bindgen bindings (`src/wasm.rs`) — `npm --prefix sdk run build:wasm`
   produces the self-contained npm artifact under `sdk/pkg/`.
 - ✅ JS shim — migration-safe IndexedDB store + durable queue, both transports, hx-optimistic
   extension, `startSync`, catch-up hydration, idempotent/CSRF-aware writes, and
-  WS auto-reconnect, covered by the Node SDK suite.
+  WS auto-reconnect, covered by the Node SDK suite; plus write policies/error
+  modes, OTel-adaptable telemetry, per-row/per-plane `synced_at`, the HLC, the
+  schema validator + `zodSchemas`, and the Web-Storage fallback store.
 - ✅ SeaORM/Postgres adapter — embedded migration, trigger/RLS capture journal,
-  PostgREST catch-up RPC, and live-Postgres integration coverage.
-- ✅ Dart/Flutter package — durable SQLite store, serialized reconcile client,
-  Supabase transport, and typed JSON adapters for `fiducia_client`.
+  PostgREST catch-up RPC, `install_timestamps` (monotonic `updated_at`,
+  immutable `created_at`), and live-Postgres integration coverage.
+- ✅ Dart/Flutter package — durable SQLite store (v2 schema adds
+  `synced_at_ms`/`hlc` in place), serialized reconcile client with the same
+  policy/error-mode/telemetry surface, Supabase transport, and typed JSON
+  adapters for `fiducia_client`.
 
 ## Develop
 
 ```sh
 ./shell cargo test --locked          # core logic (no browser/wasm needed)
 cargo test --workspace --locked      # core + SeaORM/Postgres adapter
+# Live-Postgres integration (journal + timestamp triggers), e.g. via Docker:
+#   docker run --rm -d -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16
+#   TEST_DATABASE_URL=postgres://postgres:test@localhost:55432/postgres cargo test --workspace --locked
 
 # SDK tests use the real node-target WASM core.
 wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
 npm --prefix sdk test
 npm --prefix sdk run typecheck
+node sdk/scripts/embed-sync-schema.mjs --check   # schema embed drift gate
 
 # Mobile package.
 (cd dart && flutter analyze && flutter test)

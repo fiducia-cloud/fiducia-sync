@@ -111,4 +111,87 @@ async fn postgres_journal_captures_orders_and_isolates_tenants() {
         .await
         .expect("record is idempotent by write key");
     assert_eq!(sequence, replayed_sequence);
+
+    timestamp_discipline_holds(&store).await;
+}
+
+/// `install_timestamps` must fill created_at/updated_at on insert, keep
+/// created_at immutable, and keep updated_at strictly monotonic per row even
+/// when the wall clock lags the stored value (the CockroachDB-style rule).
+async fn timestamp_discipline_holds(store: &PostgresSyncStore) {
+    store
+        .database()
+        .execute_unprepared(
+            "drop table if exists public.fiducia_sync_test_stamped;\
+             create table public.fiducia_sync_test_stamped (\
+                 id text primary key,\
+                 note text not null default '',\
+                 created_at timestamptz,\
+                 updated_at timestamptz\
+             );\
+             select fiducia_sync.install_timestamps(\
+                 'public.fiducia_sync_test_stamped'::regclass\
+             );\
+             select fiducia_sync.install_timestamps(\
+                 'public.fiducia_sync_test_stamped'::regclass\
+             );",
+        )
+        .await
+        .expect("install_timestamps is idempotent");
+
+    // s1 is an import: it keeps its historical created_at and a (hostilely)
+    // future updated_at. s2 relies on the trigger for both stamps.
+    store
+        .database()
+        .execute_unprepared(
+            "insert into public.fiducia_sync_test_stamped (id, created_at, updated_at) \
+             values (\
+                 's1',\
+                 clock_timestamp() - interval '1 hour',\
+                 clock_timestamp() + interval '1 hour'\
+             );\
+             insert into public.fiducia_sync_test_stamped (id) values ('s2');\
+             update public.fiducia_sync_test_stamped \
+             set note = 'edited', created_at = clock_timestamp() \
+             where id = 's1';",
+        )
+        .await
+        .expect("write stamped rows");
+
+    let stamped = store
+        .database()
+        .query_one_raw(sea_orm::Statement::from_string(
+            sea_orm::DbBackend::Postgres,
+            "select \
+                 (s1.created_at < clock_timestamp() - interval '55 minutes') \
+                     as created_immutable,\
+                 (s1.updated_at > clock_timestamp() + interval '55 minutes') \
+                     as updated_monotonic,\
+                 (s2.created_at is not null \
+                     and s2.updated_at >= s2.created_at \
+                     and s2.created_at > clock_timestamp() - interval '5 minutes') \
+                     as defaults_filled \
+             from public.fiducia_sync_test_stamped as s1, \
+                  public.fiducia_sync_test_stamped as s2 \
+             where s1.id = 's1' and s2.id = 's2'",
+        ))
+        .await
+        .expect("inspect stamped rows")
+        .expect("stamped assertion row");
+
+    let created_immutable = stamped
+        .try_get::<bool>("", "created_immutable")
+        .expect("created_immutable");
+    let updated_monotonic = stamped
+        .try_get::<bool>("", "updated_monotonic")
+        .expect("updated_monotonic");
+    let defaults_filled = stamped
+        .try_get::<bool>("", "defaults_filled")
+        .expect("defaults_filled");
+    assert!(created_immutable, "an UPDATE must not rewrite created_at");
+    assert!(
+        updated_monotonic,
+        "updated_at must stay ahead of its old value when the clock lags"
+    );
+    assert!(defaults_filled, "insert must fill both stamps when absent");
 }

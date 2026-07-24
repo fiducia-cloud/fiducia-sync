@@ -19,4 +19,6 @@ adapter, the TypeScript browser SDK, and the Dart/Flutter package.
   RPCs.
 
 See [JSONB merge semantics](jsonb-merge.md) for the partial-update behavior and
-its concurrency boundary.
+its concurrency boundary, [timestamps](timestamps.md) for the
+`created_at`/`updated_at`/`synced_at` + Hybrid-Logical-Clock model, and
+[validation](validation.md) for the one-schema/every-runtime contract.

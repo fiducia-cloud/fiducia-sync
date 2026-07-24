@@ -5,6 +5,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { openStore, makeQueue } from "../src/store.mjs";
 
+// Project version+dirty for asserts that predate syncedAtMs (covered separately).
+const versionDirty = (meta) => meta && { version: meta.version, dirty: meta.dirty };
+
 let dbCounter = 0;
 async function freshStore(tables = ["api_keys"]) {
   dbCounter += 1;
@@ -20,7 +23,7 @@ test("put/get/meta round-trips a row with its version + dirty flag", async (t) =
 
   await store.put("api_keys", "k1", { name: "prod" }, { version: 3, dirty: true });
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "prod" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: true });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: true });
 });
 
 test("setMeta adopts a new version and clears dirty; del removes", async (t) => {
@@ -29,7 +32,7 @@ test("setMeta adopts a new version and clears dirty; del removes", async (t) => 
 
   await store.put("api_keys", "k1", { name: "prod" }, { version: 3, dirty: true });
   assert.equal(await store.setMeta("api_keys", "k1", { version: 4, dirty: false }), true);
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 4, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 4, dirty: false });
   assert.equal(await store.setMeta("api_keys", "missing", { dirty: false }), false);
 
   await store.del("api_keys", "k1");
@@ -98,7 +101,7 @@ test("optimistic row mutation and queue append commit atomically", async (t) => 
     ),
   );
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "before" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 2,
     dirty: false,
   });
@@ -115,7 +118,7 @@ test("optimistic row mutation and queue append commit atomically", async (t) => 
     { name: "after" },
   );
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "after" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 2,
     dirty: true,
   });
@@ -147,7 +150,7 @@ test("server-wins state and stale queue removal commit together", async (t) => {
   );
 
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "server" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 3,
     dirty: false,
   });
@@ -164,7 +167,7 @@ test("ack settlement is atomic and a retired sequence cannot relabel server stat
     id: "k1", table: "api_keys", op: "upsert", base_version: 2, key: "write-1",
   });
   assert.deepEqual(await queue.settleAck("api_keys", "k1", seq, 3), { Adopt: 3 });
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: false });
   assert.equal((await queue.list()).length, 0);
 
   await store.put("api_keys", "k1", { name: "server-conflict" }, { version: 4, dirty: false });

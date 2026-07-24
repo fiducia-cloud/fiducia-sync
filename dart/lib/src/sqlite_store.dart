@@ -3,33 +3,41 @@ import 'dart:math' as math;
 
 import 'package:sqflite/sqflite.dart';
 
+import 'hlc.dart';
 import 'models.dart';
 import 'store.dart';
 
 const _rowsTable = '_fiducia_rows';
 const _queueTable = '_fiducia_queue';
 const _metadataTable = '_fiducia_metadata';
+const _schemaVersion = 2;
 
 final class SqliteSyncStore implements SyncStore {
-  SqliteSyncStore._(this._database);
+  SqliteSyncStore._(this._database, this._nowMs);
 
   final Database _database;
+  final int Function() _nowMs;
 
+  /// `nowMs` is the wall clock used for synced_at stamps (injectable in tests).
   static Future<SqliteSyncStore> open(
     String path, {
     DatabaseFactory? factory,
+    int Function()? nowMs,
   }) async {
     final resolvedFactory = factory ?? databaseFactory;
     final database = await resolvedFactory.openDatabase(
       path,
       options: OpenDatabaseOptions(
-        version: 1,
+        version: _schemaVersion,
         onConfigure: (database) => database.execute('pragma foreign_keys = on'),
         onCreate: _createSchema,
-        onUpgrade: (database, _, _) => _createSchema(database, 1),
+        onUpgrade: _upgradeSchema,
       ),
     );
-    return SqliteSyncStore._(database);
+    return SqliteSyncStore._(
+      database,
+      nowMs ?? (() => DateTime.now().millisecondsSinceEpoch),
+    );
   }
 
   static Future<void> _createSchema(Database database, int _) async {
@@ -41,6 +49,7 @@ final class SqliteSyncStore implements SyncStore {
           row_json text not null,
           version integer not null,
           dirty integer not null check (dirty in (0, 1)),
+          synced_at_ms integer,
           primary key (table_name, row_id)
         )
       ''')
@@ -54,7 +63,8 @@ final class SqliteSyncStore implements SyncStore {
           base_version integer not null,
           write_key text,
           attempts integer not null default 0,
-          superseded_version integer
+          superseded_version integer,
+          hlc text
         )
       ''')
       ..execute('''
@@ -73,6 +83,39 @@ final class SqliteSyncStore implements SyncStore {
         )
       ''');
     await batch.commit(noResult: true);
+  }
+
+  /// v1 → v2 preserves every row and queued write: it only ADDS the
+  /// `synced_at_ms` and `hlc` columns (both nullable, so legacy records read
+  /// back as "never synced"/"no stamp").
+  static Future<void> _upgradeSchema(
+    Database database,
+    int oldVersion,
+    int newVersion,
+  ) async {
+    await _createSchema(database, newVersion);
+    if (oldVersion < 2) {
+      await _addColumnIfMissing(
+        database,
+        _rowsTable,
+        'synced_at_ms',
+        'integer',
+      );
+      await _addColumnIfMissing(database, _queueTable, 'hlc', 'text');
+    }
+  }
+
+  static Future<void> _addColumnIfMissing(
+    Database database,
+    String table,
+    String column,
+    String type,
+  ) async {
+    final columns = await database.rawQuery('pragma table_info($table)');
+    final present = columns.any((info) => info['name'] == column);
+    if (!present) {
+      await database.execute('alter table $table add column $column $type');
+    }
   }
 
   @override
@@ -104,7 +147,16 @@ final class SqliteSyncStore implements SyncStore {
     JsonMap row,
     LocalRowMetadata metadata,
   ) async {
-    await _put(_database, table, id, row, metadata);
+    // An explicit stamp wins; otherwise a clean put marks "server state landed
+    // here now" while a dirty put preserves the row's previous stamp.
+    await _database.transaction((transaction) async {
+      final synced =
+          metadata.syncedAtMs ??
+          (metadata.dirty
+              ? (await _read(transaction, table, id))?.metadata.syncedAtMs
+              : _nowMs());
+      await _put(transaction, table, id, row, metadata, syncedAtMs: synced);
+    });
   }
 
   @override
@@ -117,7 +169,11 @@ final class SqliteSyncStore implements SyncStore {
   }
 
   @override
-  Future<int> enqueueOptimistic(QueuedWrite write, JsonMap? row) {
+  Future<int> enqueueOptimistic(
+    QueuedWrite write,
+    JsonMap? row, {
+    HlcStamp? hlcState,
+  }) {
     return _database.transaction((transaction) async {
       if (write.operation == ChangeOperation.delete) {
         await transaction.delete(
@@ -126,13 +182,20 @@ final class SqliteSyncStore implements SyncStore {
           whereArgs: [write.table, write.id],
         );
       } else {
+        // A dirty write keeps the row's previous synced_at_ms — editing on
+        // top of synced state does not un-sync it.
+        final existing = await _read(transaction, write.table, write.id);
         await _put(
           transaction,
           write.table,
           write.id,
           row ?? _requiredPayload(write),
           LocalRowMetadata(version: write.baseVersion, dirty: true),
+          syncedAtMs: existing?.metadata.syncedAtMs,
         );
+      }
+      if (hlcState != null) {
+        await _putHlcState(transaction, hlcState);
       }
       return transaction.insert(_queueTable, _writeRecord(write));
     });
@@ -191,21 +254,19 @@ final class SqliteSyncStore implements SyncStore {
       final stored = await _read(transaction, table, id);
       var outcome = AckSettlement.superseded;
       if (stored != null) {
-        final adoptedVersion = stored.metadata.version <= committedVersion
-            ? committedVersion
-            : stored.metadata.version;
-        if (stored.metadata.version <= committedVersion) {
-          outcome = AckSettlement.adopted(committedVersion);
-        }
+        final adopted = stored.metadata.version <= committedVersion;
+        if (adopted) outcome = AckSettlement.adopted(committedVersion);
         await _put(
           transaction,
           table,
           id,
           stored.row,
           LocalRowMetadata(
-            version: adoptedVersion,
+            version: adopted ? committedVersion : stored.metadata.version,
             dirty: rowWrites.any((candidate) => candidate.sequence != sequence),
           ),
+          // The server confirmed this state now; a superseded ack keeps the stamp.
+          syncedAtMs: adopted ? _nowMs() : stored.metadata.syncedAtMs,
         );
       }
       await transaction.delete(
@@ -257,11 +318,17 @@ final class SqliteSyncStore implements SyncStore {
               version: stored.metadata.version,
               dirty: remaining.isNotEmpty,
             ),
+            syncedAtMs: stored.metadata.syncedAtMs,
           );
         }
       } else if (!hasNewerWrite) {
         if (stored == null || event.version >= stored.metadata.version) {
-          await _applyServer(transaction, event, dirty: remaining.isNotEmpty);
+          await _applyServer(
+            transaction,
+            event,
+            dirty: remaining.isNotEmpty,
+            syncedAtMs: _nowMs(),
+          );
         } else {
           await _put(
             transaction,
@@ -272,6 +339,7 @@ final class SqliteSyncStore implements SyncStore {
               version: stored.metadata.version,
               dirty: remaining.isNotEmpty,
             ),
+            syncedAtMs: stored.metadata.syncedAtMs,
           );
         }
       } else if (stored != null) {
@@ -284,6 +352,7 @@ final class SqliteSyncStore implements SyncStore {
             version: math.max(stored.metadata.version, event.version),
             dirty: true,
           ),
+          syncedAtMs: stored.metadata.syncedAtMs,
         );
       }
 
@@ -323,7 +392,12 @@ final class SqliteSyncStore implements SyncStore {
       )).map(_queuedWrite).where((write) => !stale.contains(write.sequence));
       final stored = await _read(transaction, event.table, event.id);
       if (remaining.isEmpty) {
-        await _applyServer(transaction, event, dirty: false);
+        await _applyServer(
+          transaction,
+          event,
+          dirty: false,
+          syncedAtMs: _nowMs(),
+        );
       } else if (stored != null) {
         await _put(
           transaction,
@@ -334,6 +408,7 @@ final class SqliteSyncStore implements SyncStore {
             version: math.max(stored.metadata.version, event.version),
             dirty: true,
           ),
+          syncedAtMs: stored.metadata.syncedAtMs,
         );
       }
       for (final sequence in staleSequences) {
@@ -396,11 +471,69 @@ final class SqliteSyncStore implements SyncStore {
         'key': 'cursor:$scope',
         'value': cursor,
       }, conflictAlgorithm: ConflictAlgorithm.replace);
+      // Every cursor advance is a completed catch-up step.
+      await transaction.insert(_metadataTable, {
+        'key': 'synced:$scope',
+        'value': _nowMs(),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
     });
   }
 
   @override
+  Future<int> markSynced([String scope = 'global']) async {
+    final at = _nowMs();
+    await _database.insert(_metadataTable, {
+      'key': 'synced:$scope',
+      'value': at,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+    return at;
+  }
+
+  @override
+  Future<SyncFreshness> syncInfo([String scope = 'global']) async {
+    final cursor = await getCursor(scope);
+    final synced = await _metadataValue('synced:$scope');
+    return SyncFreshness(cursor: cursor, lastSyncedAtMs: synced);
+  }
+
+  @override
+  Future<HlcStamp?> getHlcState() async {
+    final wall = await _metadataValue('hlc:wall');
+    if (wall == null) return null;
+    final counter = await _metadataValue('hlc:counter') ?? 0;
+    return HlcStamp(wallMs: wall, counter: counter);
+  }
+
+  @override
+  Future<void> setHlcState(HlcStamp state) {
+    return _database.transaction(
+      (transaction) => _putHlcState(transaction, state),
+    );
+  }
+
+  Future<int?> _metadataValue(String key) async {
+    final rows = await _database.query(
+      _metadataTable,
+      where: 'key = ?',
+      whereArgs: [key],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : _integer(rows.single['value'], key);
+  }
+
+  @override
   Future<void> close() => _database.close();
+}
+
+Future<void> _putHlcState(DatabaseExecutor database, HlcStamp state) async {
+  await database.insert(_metadataTable, {
+    'key': 'hlc:wall',
+    'value': state.wallMs,
+  }, conflictAlgorithm: ConflictAlgorithm.replace);
+  await database.insert(_metadataTable, {
+    'key': 'hlc:counter',
+    'value': state.counter,
+  }, conflictAlgorithm: ConflictAlgorithm.replace);
 }
 
 Future<StoredRow?> _read(
@@ -422,14 +555,16 @@ Future<void> _put(
   String table,
   String id,
   JsonMap row,
-  LocalRowMetadata metadata,
-) async {
+  LocalRowMetadata metadata, {
+  required int? syncedAtMs,
+}) async {
   await database.insert(_rowsTable, {
     'table_name': table,
     'row_id': id,
     'row_json': jsonEncode(row),
     'version': metadata.version,
     'dirty': metadata.dirty ? 1 : 0,
+    'synced_at_ms': syncedAtMs,
   }, conflictAlgorithm: ConflictAlgorithm.replace);
 }
 
@@ -437,6 +572,7 @@ Future<void> _applyServer(
   DatabaseExecutor database,
   SyncChange event, {
   required bool dirty,
+  required int? syncedAtMs,
 }) async {
   if (event.operation == ChangeOperation.delete) {
     await database.delete(
@@ -452,16 +588,19 @@ Future<void> _applyServer(
       event.row ??
           (throw const FormatException('upsert change must carry a row')),
       LocalRowMetadata(version: event.version, dirty: dirty),
+      syncedAtMs: syncedAtMs,
     );
   }
 }
 
 StoredRow _storedRow(Map<String, Object?> record) {
+  final synced = record['synced_at_ms'];
   return StoredRow(
     row: _decodeMap(record['row_json'], 'row_json'),
     metadata: LocalRowMetadata(
       version: _integer(record['version'], 'version'),
       dirty: _integer(record['dirty'], 'dirty') == 1,
+      syncedAtMs: synced == null ? null : _integer(synced, 'synced_at_ms'),
     ),
   );
 }
@@ -482,6 +621,7 @@ QueuedWrite _queuedWrite(Map<String, Object?> record) {
     supersededVersion: record['superseded_version'] == null
         ? null
         : _integer(record['superseded_version'], 'superseded_version'),
+    hlc: record['hlc'] as String?,
   );
 }
 
@@ -494,6 +634,7 @@ Map<String, Object?> _writeRecord(QueuedWrite write) => {
   'write_key': write.key,
   'attempts': write.attempts,
   'superseded_version': write.supersededVersion,
+  'hlc': write.hlc,
 };
 
 JsonMap _requiredPayload(QueuedWrite write) {

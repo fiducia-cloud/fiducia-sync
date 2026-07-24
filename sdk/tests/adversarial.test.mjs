@@ -11,6 +11,9 @@ import { openStore, makeQueue } from "../src/store.mjs";
 import { wrapCore } from "../src/core.mjs";
 import { makeSyncClient } from "../src/client.mjs";
 
+// Project version+dirty for asserts that predate syncedAtMs (covered separately).
+const versionDirty = (meta) => meta && { version: meta.version, dirty: meta.dirty };
+
 const core = wrapCore(wasm);
 let n = 0;
 async function setup() {
@@ -31,7 +34,7 @@ test("a duplicate own-echo after the queue drained never downgrades the version"
 
   // First echo (v3) adopts + drains the queue.
   assert.equal(await client.applyChange(change({ version: 3, row: { name: "mine" } })), "echo-adopted");
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: false });
 
   // A newer server change lands (v7), then the transport redelivers the STALE v3
   // echo. It must be ignored, not downgrade the row back to v3.
@@ -93,7 +96,7 @@ test("acking an older write keeps a newer queued edit dirty and conflict-visible
   assert.equal((await first).status, "acked");
 
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "edit-2" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 3,
     dirty: true,
   });
@@ -137,7 +140,7 @@ test("out-of-order keyed echoes never downgrade a newer committed version", asyn
     await client.applyChange(change({ version: 4, write_key: "write-2" })),
     "echo-adopted",
   );
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 4,
     dirty: true,
   });
@@ -146,7 +149,7 @@ test("out-of-order keyed echoes never downgrade a newer committed version", asyn
     await client.applyChange(change({ version: 3, write_key: "write-1" })),
     "echo-adopted",
   );
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 4,
     dirty: false,
   });
@@ -200,7 +203,7 @@ test("hydrate that includes the committed version of a queued write dequeues it 
   // it through applyChange, which should recognize the echo and drain the queue.
   const res = await client.hydrate("api_keys", [{ id: "k1", version: 3, name: "mine" }], { prune: true });
   assert.equal(res.applied, 1);
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: false });
   assert.equal((await queue.list()).length, 0, "the queued write was adopted, not left stuck");
 });
 
@@ -258,7 +261,7 @@ test("a keyed own echo matches by token even when its committed version drifted"
     write_key: "our-write",
   }));
   assert.equal(outcome, "echo-adopted");
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 7,
     dirty: false,
   });
@@ -275,7 +278,7 @@ test("concurrent transport callbacks are serialized and cannot downgrade a row",
   await Promise.all([older, newer]);
 
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "v4" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 4,
     dirty: false,
   });
@@ -366,7 +369,7 @@ test("a malformed acknowledgement stays durable for retry", async (t) => {
   );
   assert.equal(result.status, "queued");
   assert.equal((await queue.list()).length, 1);
-  assert.deepEqual(await store.meta("api_keys", "k1"), {
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), {
     version: 0,
     dirty: true,
   });

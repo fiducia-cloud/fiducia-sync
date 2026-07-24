@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fiducia.cloud/schemas/sync.schema.json",
+  "title": "FiduciaSync",
+  "description": "Canonical local-first sync envelopes shared by fiducia-interfaces, fiducia-sync, and fiducia-clients.",
+  "type": "object",
+  "$defs": {
+    "SyncChangeEvent": {
+      "type": "object",
+      "title": "SyncChangeEvent",
+      "description": "One authoritative committed row change. Row version orders reconciliation; sync_sequence is an optional plane-wide catch-up cursor.",
+      "additionalProperties": false,
+      "required": ["table", "op", "id", "version", "row", "at_ms"],
+      "properties": {
+        "table": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Logical table name from the generated database interface."
+        },
+        "op": {
+          "type": "string",
+          "enum": ["upsert", "delete"],
+          "description": "Whether the committed row is present or deleted."
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical string form of the row primary key."
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Per-row monotonic conflict and reconciliation version."
+        },
+        "row": {
+          "type": ["object", "null"],
+          "description": "Authoritative whole row for upsert; null for delete."
+        },
+        "at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Commit time in Unix milliseconds."
+        },
+        "write_key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Client-minted identity echoed for exact own-write recognition."
+        },
+        "sync_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Optional plane-wide catch-up cursor; never use it for row reconciliation."
+        }
+      }
+    },
+    "SyncQueuedWrite": {
+      "type": "object",
+      "title": "SyncQueuedWrite",
+      "description": "One durable optimistic write sent by browser or mobile clients.",
+      "additionalProperties": false,
+      "required": ["id", "table", "op", "payload", "base_version", "key"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target row id."
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target logical table."
+        },
+        "op": {
+          "type": "string",
+          "enum": ["upsert", "delete"],
+          "description": "Optimistic mutation kind."
+        },
+        "payload": {
+          "type": ["object", "null"],
+          "description": "Whole-row upsert payload or null for delete."
+        },
+        "base_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Row version the mutation was based on."
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Stable idempotency and exact-echo identity for this logical write."
+        }
+      }
+    },
+    "SyncWriteAcknowledgement": {
+      "type": "object",
+      "title": "SyncWriteAcknowledgement",
+      "description": "Server acknowledgement returned after a sync write commits.",
+      "additionalProperties": false,
+      "required": ["id", "committed_version"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Committed row id; must equal the queued write id."
+        },
+        "committed_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Authoritative row version after commit."
+        }
+      }
+    },
+    "SyncPullPage": {
+      "type": "object",
+      "title": "SyncPullPage",
+      "description": "Globally ordered catch-up page. Persist next_cursor only after every change has reconciled.",
+      "additionalProperties": false,
+      "required": ["changes", "next_cursor", "has_more"],
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SyncChangeEvent" },
+          "description": "Committed changes in ascending sync_sequence order."
+        },
+        "next_cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Last sequence represented by this page."
+        },
+        "has_more": {
+          "type": "boolean",
+          "description": "Whether another page should be requested immediately."
+        }
+      }
+    }
+  }
+}

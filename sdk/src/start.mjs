@@ -11,6 +11,7 @@
 import { openStore, makeQueue } from "./store.mjs";
 import { loadBrowserCore } from "./core.mjs";
 import { makeSyncClient } from "./client.mjs";
+import { emitEvent, normalizeTelemetry } from "./telemetry.mjs";
 import { connectBackend, makeBackendSend } from "./transports/backend.mjs";
 import { isChangeEvent } from "./transports/decode.mjs";
 import { subscribeSupabase } from "./transports/supabase.mjs";
@@ -27,6 +28,10 @@ import { subscribeSupabase } from "./transports/supabase.mjs";
  *   incremental Postgres/Supabase cursor fetch; the cursor advances only after
  *   every change in a page has reconciled durably
  * @param {(status:string, err?:Error)=>void} [o.onStatus]
+ * @param {object|Function} [o.telemetry] OpenTelemetry-adaptable sink (telemetry.mjs)
+ * @param {"local-only"|"local-first"|"server-first"|"server-only"} [o.writePolicy]
+ *   client-wide default write policy (per-write options still override)
+ * @param {"return"|"throw"|"emit"} [o.errorMode] client-wide default error mode
  * @param {boolean} [o.hydratePrune=true] treat hydrate snapshots as the complete set
  * @param {string} [o.cursorScope="global"] durable cursor namespace
  * @param {number} [o.pullPageSize=500] incremental page size
@@ -41,6 +46,9 @@ export async function startSync({
   hydrateFetch,
   pullFetch,
   onStatus,
+  telemetry,
+  writePolicy,
+  errorMode,
   hydratePrune = true,
   cursorScope = "global",
   pullPageSize = 500,
@@ -48,10 +56,23 @@ export async function startSync({
   const resolvedCore = core ?? (await loadBrowserCore());
   const store = await openStore(dbName, tables);
   const queue = makeQueue(store);
-  const client = makeSyncClient({ store, queue, core: resolvedCore });
+  const observe = normalizeTelemetry(telemetry);
+  const client = makeSyncClient({
+    store,
+    queue,
+    core: resolvedCore,
+    telemetry: observe,
+    ...(writePolicy !== undefined ? { writePolicy } : {}),
+    ...(errorMode !== undefined ? { errorMode } : {}),
+  });
   const stops = [];
 
   const report = (status, error) => {
+    emitEvent(observe, "fiducia.sync.status", {
+      atMs: Date.now(),
+      attributes: { "sync.status": status },
+      error: error ?? undefined,
+    });
     if (onStatus) onStatus(status, error);
     else if (error) console.error(`[fiducia-sync] ${status}: ${error.message ?? String(error)}`);
   };
@@ -67,9 +88,30 @@ export async function startSync({
   let hydrating = false;
   async function pullAll() {
     if (!pullFetch) return;
+    const startedAt = Date.now();
+    try {
+      const applied = await pullAllPages();
+      emitEvent(observe, "fiducia.sync.pull", {
+        atMs: startedAt,
+        durationMs: Date.now() - startedAt,
+        attributes: { "sync.applied": applied ?? 0, "sync.scope": cursorScope },
+      });
+    } catch (error) {
+      emitEvent(observe, "fiducia.sync.pull", {
+        atMs: startedAt,
+        durationMs: Date.now() - startedAt,
+        attributes: { "sync.scope": cursorScope },
+        error,
+      });
+      throw error;
+    }
+  }
+
+  async function pullAllPages() {
     if (!Number.isSafeInteger(pullPageSize) || pullPageSize < 1 || pullPageSize > 1000) {
       throw new Error("pullPageSize must be an integer between 1 and 1000");
     }
+    let applied = 0;
     let cursor = await store.getCursor(cursorScope);
     for (let pageNumber = 0; pageNumber < 10_000; pageNumber += 1) {
       const page = await pullFetch(cursor, pullPageSize);
@@ -94,12 +136,13 @@ export async function startSync({
           throw new Error("incremental sync page contains an invalid change event");
         }
         await client.applyChange(change);
+        applied += 1;
       }
       // Applying first and advancing second makes a crash replay the page.
       // Reconciliation is idempotent, so replay is safe; skipping is not.
       await store.setCursor(page.next_cursor, cursorScope);
       cursor = page.next_cursor;
-      if (!page.has_more) return;
+      if (!page.has_more) return applied;
     }
     throw new Error("incremental sync exceeded the catch-up page limit");
   }
@@ -114,13 +157,24 @@ export async function startSync({
         report("pull-error", e);
         return;
       }
+      let hydrated = true;
       for (const table of tables) {
         if (!hydrateFetch) break;
         try {
           const rows = await hydrateFetch(table);
           await client.hydrate(table, rows, { prune: hydratePrune });
         } catch (e) {
+          hydrated = false;
           report("hydrate-error", e);
+        }
+      }
+      // A fully successful catch-up stamps plane-level sync freshness
+      // (store.syncInfo(cursorScope).lastSyncedAtMs).
+      if (hydrated && typeof store.markSynced === "function") {
+        try {
+          await store.markSynced(cursorScope);
+        } catch (e) {
+          report("mark-synced-error", e);
         }
       }
     } finally {

@@ -20,10 +20,35 @@
 //   });
 
 export { openStore, makeQueue, promisify } from "./store.mjs";
+export { openWebStorageStore, makeWebStorageQueue } from "./webstorage.mjs";
 export { deepMerge } from "./merge.mjs";
 export { wrapCore, loadBrowserCore } from "./core.mjs";
 export { makeSyncClient } from "./client.mjs";
 export { startSync } from "./start.mjs";
+export {
+  WRITE_POLICIES,
+  ERROR_MODES,
+  DEFAULT_WRITE_POLICY,
+  DEFAULT_ERROR_MODE,
+  SyncWriteError,
+  assertWritePolicy,
+  assertErrorMode,
+} from "./policy.mjs";
+export {
+  TELEMETRY_EVENTS,
+  noopTelemetry,
+  normalizeTelemetry,
+  otelTelemetry,
+} from "./telemetry.mjs";
+export { makeHlc, encodeHlc, decodeHlc, HLC_MAX_WALL_MS, HLC_MAX_COUNTER } from "./hlc.mjs";
+export { SYNC_SCHEMA } from "./sync-schema.mjs";
+export {
+  makeValidator,
+  validateSyncEnvelope,
+  assertSyncEnvelope,
+  zodSchemas,
+  SchemaValidationError,
+} from "./validate.mjs";
 export { connectBackend, backendSend, makeBackendSend } from "./transports/backend.mjs";
 export { subscribeSupabase } from "./transports/supabase.mjs";
 export { decodeBackendMessage, decodeSupabaseChange, isChangeEvent } from "./transports/decode.mjs";

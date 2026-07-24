@@ -9,6 +9,9 @@ import { openStore, makeQueue } from "../src/store.mjs";
 import { wrapCore } from "../src/core.mjs";
 import { makeSyncClient } from "../src/client.mjs";
 
+// Project version+dirty for asserts that predate syncedAtMs (covered separately).
+const versionDirty = (meta) => meta && { version: meta.version, dirty: meta.dirty };
+
 const core = wrapCore(wasm);
 let n = 0;
 async function setup() {
@@ -27,7 +30,7 @@ test("applyChange applies a newer server change (clean) and ignores a stale one"
 
   assert.equal(await client.applyChange(change({ version: 1, row: { name: "a" } })), "applied");
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "a" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 1, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 1, dirty: false });
 
   assert.equal(await client.applyChange(change({ version: 1, row: { name: "b" } })), "refreshed");
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "b" }); // equal-version server truth refreshes
@@ -43,7 +46,7 @@ test("optimisticWrite is instant + dirty, then adopts the committed version on a
   const res = await client.optimisticWrite("api_keys", "k1", { name: "b" }, send);
   assert.equal(res.status, "acked");
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "b" }); // optimistic value kept
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false }); // adopted + clean
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: false }); // adopted + clean
   assert.equal((await queue.list()).length, 0); // dequeued
 });
 
@@ -59,7 +62,7 @@ test("optimisticWrite stays queued + dirty when the send fails (offline)", async
   const res = await client.optimisticWrite("api_keys", "k1", { name: "b" }, send);
   assert.equal(res.status, "queued");
   assert.equal(res.attempts, 1);
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 2, dirty: true }); // awaiting retry
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 2, dirty: true }); // awaiting retry
   assert.equal((await queue.list())[0].attempts, 1);
 });
 
@@ -79,7 +82,7 @@ test("the echo of our own write is adopted, not flagged as a conflict", async (t
   // The exact echo is authoritative: server normalization replaces the
   // optimistic payload when no newer local edit remains.
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "server-normalized" });
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 3, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 3, dirty: false });
   assert.equal((await queue.list()).length, 0);
 });
 
@@ -159,13 +162,13 @@ test("a partial flush retires only the acked write; failures stay queued with ac
   assert.deepEqual(reported, [{ id: "k-bad", attempts: 1, error: "Error: offline" }]);
 
   // The acked write is retired and its row adopted clean...
-  assert.deepEqual(await store.meta("api_keys", "k-ok"), { version: 2, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k-ok")), { version: 2, dirty: false });
   // ...while the failed write survives durably, still dirty, for the next flush.
   const remaining = await queue.list();
   assert.equal(remaining.length, 1);
   assert.equal(remaining[0].id, "k-bad");
   assert.equal(remaining[0].attempts, 1);
-  assert.deepEqual(await store.meta("api_keys", "k-bad"), { version: 1, dirty: true });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k-bad")), { version: 1, dirty: true });
 
   // A second failed flush accumulates the durable retry counter (it must not
   // reset), so a poison write is detectable across reconnects/reloads.
@@ -178,7 +181,7 @@ test("a partial flush retires only the acked write; failures stay queued with ac
   // Once the network heals, the same queued write flushes cleanly.
   assert.equal(await client.flushQueue(async (w) => ({ id: w.id, committed_version: 5 })), 1);
   assert.equal((await queue.list()).length, 0);
-  assert.deepEqual(await store.meta("api_keys", "k-bad"), { version: 5, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k-bad")), { version: 5, dirty: false });
 });
 
 test("a genuine conflict (someone else's newer change) resolves server-wins and drops the stale queued write", async (t) => {
@@ -192,7 +195,7 @@ test("a genuine conflict (someone else's newer change) resolves server-wins and 
   const r = await client.applyChange(change({ version: 5, row: { name: "theirs" } }));
   assert.equal(r, "conflict-resolved");
   assert.deepEqual(await store.get("api_keys", "k1"), { name: "theirs" }); // server wins
-  assert.deepEqual(await store.meta("api_keys", "k1"), { version: 5, dirty: false });
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k1")), { version: 5, dirty: false });
   assert.equal((await queue.list()).length, 0); // stale queued write dropped
 });
 
@@ -232,7 +235,7 @@ test("hydrate catch-up applies newer rows, ignores stale, keeps dirty, prunes cl
   );
 
   assert.deepEqual(await store.get("api_keys", "k1"), { id: "k1", version: 2, name: "new" }); // applied
-  assert.deepEqual(await store.meta("api_keys", "k2"), { version: 1, dirty: true }); // dirty preserved
+  assert.deepEqual(versionDirty(await store.meta("api_keys", "k2")), { version: 1, dirty: true }); // dirty preserved
   assert.equal(await store.get("api_keys", "k3"), null); // pruned (clean + missing)
   assert.equal(res.applied, 1);
   assert.equal(res.ignored, 1);

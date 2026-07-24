@@ -216,6 +216,109 @@ begin
 end
 $function$;
 
+-- Timestamp discipline for synced rows, borrowed from distributed databases:
+-- CockroachDB's hybrid logical clocks never let a transaction timestamp move
+-- backwards even when the wall clock does, and CouchDB-style replicas treat
+-- write time as advisory next to the revision counter. Here the per-row
+-- `version` stays the sole reconciliation key, and this trigger makes the
+-- human-facing columns trustworthy:
+--
+--   * `created_at` is immutable after birth — an UPDATE cannot rewrite it.
+--   * `updated_at` is strictly monotonic per row — `greatest(clock_timestamp(),
+--     old.updated_at + 1 microsecond)`, so a stepped-back system clock (NTP,
+--     VM resume) can never produce an `updated_at` that regresses or repeats.
+--   * INSERT honors caller-supplied values (imports/backfills keep their
+--     history) and fills both columns when absent.
+--
+-- `synced_at` deliberately does NOT exist server-side: "when did a replica
+-- last reconcile this row" is a per-device fact, so each client store records
+-- it locally (see the SDK/Flutter stores), while the journal's `changed_at`
+-- remains the server-side commit clock carried to clients as `at_ms`.
+create or replace function fiducia_sync.maintain_row_timestamps()
+returns trigger
+language plpgsql
+volatile
+security definer
+set search_path = pg_catalog, fiducia_sync
+as $function$
+declare
+    v_created_column text := coalesce(tg_argv[0], 'created_at');
+    v_updated_column text := coalesce(tg_argv[1], 'updated_at');
+    v_new jsonb := to_jsonb(new);
+    v_old jsonb := case when tg_op = 'UPDATE' then to_jsonb(old) else null end;
+    v_now timestamptz := clock_timestamp();
+    v_old_updated timestamptz;
+    v_created timestamptz;
+    v_updated timestamptz;
+begin
+    if tg_op = 'INSERT' then
+        v_created := coalesce((v_new ->> v_created_column)::timestamptz, v_now);
+        v_updated := greatest(
+            coalesce((v_new ->> v_updated_column)::timestamptz, v_created),
+            v_created
+        );
+    else
+        v_created := coalesce(
+            (v_old ->> v_created_column)::timestamptz,
+            (v_new ->> v_created_column)::timestamptz,
+            v_now
+        );
+        v_old_updated := (v_old ->> v_updated_column)::timestamptz;
+        v_updated := greatest(
+            v_now,
+            coalesce(v_old_updated, v_now) + interval '1 microsecond'
+        );
+    end if;
+
+    new := jsonb_populate_record(
+        new,
+        jsonb_build_object(v_created_column, v_created, v_updated_column, v_updated)
+    );
+    return new;
+end
+$function$;
+
+create or replace function fiducia_sync.install_timestamps(
+    p_table regclass,
+    p_created_column name default 'created_at',
+    p_updated_column name default 'updated_at'
+)
+returns void
+language plpgsql
+volatile
+set search_path = pg_catalog, fiducia_sync
+as $function$
+declare
+    v_column name;
+begin
+    foreach v_column in array array[p_created_column, p_updated_column]
+    loop
+        if not exists (
+            select 1
+            from pg_attribute
+            where attrelid = p_table
+              and attname = v_column
+              and attnum > 0
+              and not attisdropped
+        ) then
+            raise exception 'required timestamp column % is missing from %', v_column, p_table;
+        end if;
+    end loop;
+
+    execute format('drop trigger if exists zzz_fiducia_sync_timestamps on %s', p_table);
+    -- PostgreSQL fires same-event row triggers in name order; the zzz prefix
+    -- makes this discipline run LAST, so an earlier trigger that stamps a raw
+    -- now() (e.g. a bump_row_version-style trigger) is corrected, not trusted.
+    execute format(
+        'create trigger zzz_fiducia_sync_timestamps before insert or update on %s '
+        'for each row execute function fiducia_sync.maintain_row_timestamps(%L, %L)',
+        p_table,
+        p_created_column,
+        p_updated_column
+    );
+end
+$function$;
+
 create or replace function public.fiducia_sync_pull(
     p_tenant_id text,
     p_after bigint default 0,
@@ -259,8 +362,12 @@ revoke all on function fiducia_sync.record_change(
     text, text, text, text, bigint, jsonb, text
 ) from public;
 revoke all on function fiducia_sync.capture_change() from public;
+revoke all on function fiducia_sync.maintain_row_timestamps() from public;
 revoke all on function fiducia_sync.install_table(
     regclass, name, name, name
+) from public;
+revoke all on function fiducia_sync.install_timestamps(
+    regclass, name, name
 ) from public;
 revoke all on function public.fiducia_sync_pull(
     text, bigint, integer

@@ -94,10 +94,20 @@ async function withStore(db, name, mode, operation) {
 
 /**
  * Open (or create) the per-plane store.
+ *
+ * Every record carries `synced_at_ms` — the LOCAL wall-clock moment this
+ * device last adopted server-authoritative state for the row (`null` until it
+ * has). It is deliberately per-device (a replica fact, not a server fact —
+ * the server-side columns are `created_at`/`updated_at` plus the journal's
+ * `changed_at`/`at_ms`), stamped whenever a clean/authoritative payload lands
+ * and preserved across dirty optimistic writes.
+ *
  * @param {string} dbName  e.g. "fiducia-customer" / "fiducia-admin"
  * @param {string[]} tables synced table names (one object store each)
+ * @param {object} [options]
+ * @param {() => number} [options.now] wall clock, injectable for tests
  */
-export async function openStore(dbName, tables) {
+export async function openStore(dbName, tables, { now = () => Date.now() } = {}) {
   const requiredStores = [...new Set([...tables, QUEUE_STORE, META_STORE])];
   let db = await openDatabase(dbName, undefined, tables);
 
@@ -144,28 +154,52 @@ export async function openStore(dbName, tables) {
       return rec ? rec.row : null;
     },
 
-    /** Sync metadata { version, dirty } for a row (or null if absent). */
+    /**
+     * Sync metadata { version, dirty, syncedAtMs } for a row (or null if
+     * absent). `syncedAtMs` is null until server-authoritative state has
+     * landed for the row on THIS device.
+     */
     async meta(table, id) {
       const rec = await withStore(db, table, "readonly", (objectStore) =>
         promisify(objectStore.get(id)),
       );
-      return rec ? { version: rec.version, dirty: Boolean(rec.dirty) } : null;
+      return rec
+        ? {
+            version: rec.version,
+            dirty: Boolean(rec.dirty),
+            syncedAtMs: rec.synced_at_ms ?? null,
+          }
+        : null;
     },
 
-    /** Upsert a row with its version; `dirty` marks an un-acked optimistic write. */
-    async put(table, id, row, { version, dirty = false }) {
-      await withStore(db, table, "readwrite", (objectStore) =>
-        promisify(objectStore.put({ id, row, version, dirty })),
-      );
+    /**
+     * Upsert a row with its version; `dirty` marks an un-acked optimistic
+     * write. `syncedAtMs` may be forced; when omitted, a clean put stamps "the
+     * server state landed here now" and a dirty put preserves the previous
+     * stamp (an optimistic edit does not un-sync what it was based on).
+     */
+    async put(table, id, row, { version, dirty = false, syncedAtMs }) {
+      await withStore(db, table, "readwrite", async (objectStore) => {
+        let synced = syncedAtMs;
+        if (synced === undefined) {
+          synced = dirty
+            ? ((await promisify(objectStore.get(id)))?.synced_at_ms ?? null)
+            : now();
+        }
+        await promisify(
+          objectStore.put({ id, row, version, dirty, synced_at_ms: synced ?? null }),
+        );
+      });
     },
 
     /** Mark an existing row clean/dirty and (optionally) adopt a new version. */
-    async setMeta(table, id, { version, dirty }) {
+    async setMeta(table, id, { version, dirty, syncedAtMs }) {
       return withStore(db, table, "readwrite", async (objectStore) => {
         const rec = await promisify(objectStore.get(id));
         if (!rec) return false;
         if (version !== undefined) rec.version = version;
         if (dirty !== undefined) rec.dirty = dirty;
+        if (syncedAtMs !== undefined) rec.synced_at_ms = syncedAtMs;
         await promisify(objectStore.put(rec));
         return true;
       });
@@ -208,12 +242,61 @@ export async function openStore(dbName, tables) {
         if (current && cursor < current.value) {
           throw new Error("sync cursor cannot move backwards");
         }
-        await promisify(objectStore.put({ key, value: cursor }));
+        await promisify(objectStore.put({ key, value: cursor, synced_at_ms: now() }));
         return cursor;
       });
     },
 
+    /**
+     * Record "this plane finished a successful catch-up now" (also stamped
+     * implicitly by every cursor advance). Returns the stamp.
+     */
+    async markSynced(scope = "global") {
+      const at = now();
+      await withStore(db, META_STORE, "readwrite", (objectStore) =>
+        promisify(objectStore.put({ key: `synced:${scope}`, value: at })),
+      );
+      return at;
+    },
+
+    /**
+     * Plane-level sync freshness: the durable catch-up cursor and the last
+     * wall-clock moment this device completed a catch-up for `scope`
+     * (`lastSyncedAtMs` is null before the first one).
+     */
+    async syncInfo(scope = "global") {
+      return withStore(db, META_STORE, "readonly", async (objectStore) => {
+        const [cursorRec, syncedRec] = await Promise.all([
+          promisify(objectStore.get(`cursor:${scope}`)),
+          promisify(objectStore.get(`synced:${scope}`)),
+        ]);
+        const stamps = [cursorRec?.synced_at_ms, syncedRec?.value].filter(
+          (v) => typeof v === "number",
+        );
+        return {
+          cursor: cursorRec?.value ?? 0,
+          lastSyncedAtMs: stamps.length > 0 ? Math.max(...stamps) : null,
+        };
+      });
+    },
+
+    /** Persisted Hybrid Logical Clock state (see hlc.mjs), or null. */
+    async getHlcState() {
+      const rec = await withStore(db, META_STORE, "readonly", (objectStore) =>
+        promisify(objectStore.get("hlc:global")),
+      );
+      return rec ? { wallMs: rec.wallMs ?? 0, counter: rec.counter ?? 0 } : null;
+    },
+
+    /** Persist HLC state so device stamps stay monotonic across reloads. */
+    async setHlcState({ wallMs, counter }) {
+      await withStore(db, META_STORE, "readwrite", (objectStore) =>
+        promisify(objectStore.put({ key: "hlc:global", wallMs, counter })),
+      );
+    },
+
     _db: db,
+    _now: now,
     close() {
       db.close();
     },
@@ -226,6 +309,7 @@ export async function openStore(dbName, tables) {
  */
 export function makeQueue(store) {
   const db = store._db;
+  const now = store._now ?? (() => Date.now());
   return {
     /** Append a write; returns its assigned seq. */
     async enqueue(write) {
@@ -237,28 +321,52 @@ export function makeQueue(store) {
      * Atomically apply an optimistic row mutation and append its retry record.
      * A crash or IndexedDB abort can therefore leave neither change, but never
      * a dirty/deleted row whose only durable resend intent is missing.
+     *
+     * `hlcState` (when given) persists the write's Hybrid Logical Clock state
+     * in the SAME transaction, so a stamp can never outlive a crash that its
+     * clock state did not.
      */
-    async enqueueOptimistic(write, row) {
+    async enqueueOptimistic(write, row, { hlcState } = {}) {
       return withTransaction(
         db,
-        [write.table, QUEUE_STORE],
+        hlcState
+          ? [write.table, QUEUE_STORE, META_STORE]
+          : [write.table, QUEUE_STORE],
         "readwrite",
         async (transaction) => {
           const rows = transaction.objectStore(write.table);
           const queued = transaction.objectStore(QUEUE_STORE);
-          const mutation =
-            write.op === "delete"
-              ? rows.delete(write.id)
-              : rows.put({
+          const requests = [];
+          if (write.op === "delete") {
+            requests.push(promisify(rows.delete(write.id)));
+          } else {
+            // A dirty write keeps the row's previous synced_at_ms — editing on
+            // top of synced state does not un-sync it.
+            const existing = await promisify(rows.get(write.id));
+            requests.push(
+              promisify(
+                rows.put({
                   id: write.id,
                   row,
                   version: write.base_version,
                   dirty: true,
-                });
-          const queueRequest = queued.add({ ...write, attempts: 0 });
-          const [, seq] = await Promise.all([
-            promisify(mutation),
-            promisify(queueRequest),
+                  synced_at_ms: existing?.synced_at_ms ?? null,
+                }),
+              ),
+            );
+          }
+          if (hlcState) {
+            requests.push(
+              promisify(
+                transaction
+                  .objectStore(META_STORE)
+                  .put({ key: "hlc:global", ...hlcState }),
+              ),
+            );
+          }
+          const [seq] = await Promise.all([
+            promisify(queued.add({ ...write, attempts: 0 })),
+            ...requests,
           ]);
           return seq;
         },
@@ -328,6 +436,7 @@ export function makeQueue(store) {
           if (rec) {
             if (rec.version <= committedVersion) {
               rec.version = committedVersion;
+              rec.synced_at_ms = now(); // the server confirmed this state
               outcome = { Adopt: committedVersion };
             }
             rec.dirty = hasOtherPendingWrite;
@@ -394,6 +503,7 @@ export function makeQueue(store) {
                       row: event.row,
                       version: event.version,
                       dirty: remainingRowWrites.length > 0,
+                      synced_at_ms: now(),
                     });
             } else {
               rec.dirty = remainingRowWrites.length > 0;
@@ -458,6 +568,7 @@ export function makeQueue(store) {
                     row: event.row,
                     version: event.version,
                     dirty: false,
+                    synced_at_ms: now(),
                   });
           } else if (rec) {
             rec.version = Math.max(rec.version, event.version);

@@ -23,6 +23,17 @@ use serde_json::Value;
 #[cfg(feature = "wasm")]
 mod wasm;
 
+// Cross-runtime vocabulary + utilities. Each has a hand-mirrored JS
+// (`sdk/src/*.mjs`) and Dart (`dart/lib/src/*.dart`) twin pinned to the same
+// shared fixtures under `schema/fixtures/`, so Rust stays the canonical source.
+pub mod hlc;
+pub mod policy;
+pub mod schema;
+
+pub use hlc::{Hlc, HlcStamp};
+pub use policy::{ErrorMode, WritePolicy};
+pub use schema::{SchemaError, SchemaValidator, SchemaViolation};
+
 /// Whether a change puts the row or removes it. Insert/Update collapse into
 /// `Upsert` — the monotonic `version` disambiguates ordering, so callers never
 /// distinguish first-write from later-write.
