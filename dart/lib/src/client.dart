@@ -10,6 +10,33 @@ typedef SendWrite = Future<WriteAcknowledgement> Function(QueuedWrite write);
 typedef PullChanges = Future<PullPage> Function(int cursor, int limit);
 typedef ResolveWritePolicy = SyncWritePolicy Function(SyncWriteContext context);
 
+const _safeErrorTypes = <String>{
+  'Exception',
+  'Error',
+  'ArgumentError',
+  'RangeError',
+  'StateError',
+  'UnsupportedError',
+  'UnimplementedError',
+  'FormatException',
+  'TimeoutException',
+  'SocketException',
+  'HttpException',
+  'HandshakeException',
+  'TlsException',
+  'WebSocketException',
+  'FileSystemException',
+  'OSError',
+  'ConcurrentModificationError',
+  'OutOfMemoryError',
+  'StackOverflowError',
+};
+
+String _errorType(Object error) {
+  final candidate = error.runtimeType.toString();
+  return _safeErrorTypes.contains(candidate) ? candidate : 'Error';
+}
+
 final class FiduciaSyncClient {
   FiduciaSyncClient({
     required this.store,
@@ -29,7 +56,8 @@ final class FiduciaSyncClient {
   SyncWritePolicy _policyFor(
     SyncWriteContext context, [
     SyncWritePolicy? override,
-  ]) => override ?? resolveWritePolicy?.call(context) ?? writePolicy;
+  ]) =>
+      (override ?? resolveWritePolicy?.call(context) ?? writePolicy).validate();
 
   bool _shouldEmit(SyncTelemetryLevel level, SyncTelemetryPhase phase) {
     if (level == SyncTelemetryLevel.off) return false;
@@ -313,7 +341,7 @@ final class FiduciaSyncClient {
             ? null
             : error,
       );
-      final errorType = error.runtimeType.toString();
+      final errorType = _errorType(error);
       _reportTelemetry(
         context,
         resolvedPolicy,

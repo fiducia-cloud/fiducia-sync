@@ -50,8 +50,13 @@ await sync.write(
 client default, a per-table/operation resolver, or an individual write.
 `optimisticWrite()` remains as a compatibility wrapper.
 
-The OpenTelemetry bridge emits low-cardinality lifecycle data and excludes row
-ids, payloads, write keys, and error messages. Replica `createdAtMs`,
+`emitOnly` requires `errors`, `lifecycle`, or `verbose` telemetry so a failed
+send cannot become both caller-silent and observer-silent. The OpenTelemetry
+bridge emits low-cardinality lifecycle data, supports a dashboardable
+`fiducia.sync.write.events` metric callback and structured INFO/WARNING/ERROR
+logs, preserves the legacy boolean log callback, and excludes row ids,
+payloads, write keys, error messages, and arbitrary custom exception names.
+Replica `createdAtMs`,
 `updatedAtMs`, and `syncedAtMs` are local UI/diagnostic metadata; only the
 server-owned row `version` is the conflict clock. See
 [`../docs/write-policies-and-replication.md`](../docs/write-policies-and-replication.md).

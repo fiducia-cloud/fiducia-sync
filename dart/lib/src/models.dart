@@ -83,6 +83,18 @@ final class SyncWritePolicy {
   final SyncFailureMode failureMode;
   final SyncTelemetryLevel telemetry;
 
+  SyncWritePolicy validate() {
+    if (failureMode == SyncFailureMode.emitOnly &&
+        telemetry == SyncTelemetryLevel.off) {
+      throw ArgumentError.value(
+        this,
+        'policy',
+        'emitOnly requires telemetry errors, lifecycle, or verbose',
+      );
+    }
+    return this;
+  }
+
   SyncWritePolicy copyWith({
     SyncWriteStrategy? strategy,
     SyncFailureMode? failureMode,
@@ -98,7 +110,7 @@ final class SyncWritePolicy {
         strategy: SyncWriteStrategy.fromWire(json['strategy']),
         failureMode: SyncFailureMode.fromWire(json['failure_mode']),
         telemetry: SyncTelemetryLevel.fromWire(json['telemetry']),
-      );
+      ).validate();
 
   JsonMap toJson() => {
     'strategy': strategy.wireName,
