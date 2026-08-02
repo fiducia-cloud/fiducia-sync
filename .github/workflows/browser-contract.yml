@@ -1,0 +1,75 @@
+name: browser-contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/browser-contract.yml"
+      - ".github/workflows/ci.yml"
+      - "sdk/package.json"
+      - "sdk/package-lock.json"
+      - "sdk/src/store.mjs"
+      - "sdk/src/local-storage.mjs"
+      - "sdk/src/merge.mjs"
+      - "sdk/tests/browser/**"
+  pull_request:
+    paths:
+      - ".github/workflows/browser-contract.yml"
+      - ".github/workflows/ci.yml"
+      - "sdk/package.json"
+      - "sdk/package-lock.json"
+      - "sdk/src/store.mjs"
+      - "sdk/src/local-storage.mjs"
+      - "sdk/src/merge.mjs"
+      - "sdk/tests/browser/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chrome-persistence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate workflow syntax
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: ./.github/workflows/ci.yml ./.github/workflows/browser-contract.yml
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.1"
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - name: Install the locked SDK toolchain
+        working-directory: sdk
+        run: npm ci --ignore-scripts
+      - name: Validate the browser harness and SDK types
+        working-directory: sdk
+        run: |
+          node --check tests/browser/chrome-cdp.mjs
+          node --check tests/browser/browser-smoke.mjs
+          npm run typecheck
+          npm audit --audit-level=high
+      - name: Resolve the runner-provided Chrome executable
+        id: chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          test -n "$chrome"
+          test -x "$chrome"
+          "$chrome" --version
+          echo "path=$chrome" >> "$GITHUB_OUTPUT"
+      - name: Exercise IndexedDB and localStorage in real Chrome
+        working-directory: sdk
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.path }}
+        run: npm run test:browser
