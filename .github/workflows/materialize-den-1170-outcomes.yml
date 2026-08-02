@@ -1,0 +1,498 @@
+name: Materialize DEN-1170 outcome observability
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-den-1170-outcomes.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-den-1170-outcomes-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/den-1170-outcome-observability'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/den-1170-outcome-observability
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.1"
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Materialize the reviewed outcome contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object sdk/src/client.mjs)" = 3b107b89695805cb12acc19737e19574c663e007
+          test "$(git hash-object sdk/src/telemetry.mjs)" = 73ed4194b21a7cd883c42b24a80735623fa5fe41
+          test "$(git hash-object sdk/src/index.d.ts)" = b57383e98e3e49534b6c033d67c3bbd59a58ca6f
+          test "$(git hash-object sdk/README.md)" = 286831b64ea0de86629ad5f8282373ef839dcb79
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          client = Path('sdk/src/client.mjs')
+          text = client.read_text(encoding='utf-8')
+          policy_anchor = '''  if (!TELEMETRY_LEVELS.has(policy.telemetry)) {
+            throw new TypeError(
+              `unsupported sync write telemetry level: ${policy.telemetry}`,
+            );
+          }
+          return Object.freeze({
+          '''
+          policy_replacement = '''  if (!TELEMETRY_LEVELS.has(policy.telemetry)) {
+            throw new TypeError(
+              `unsupported sync write telemetry level: ${policy.telemetry}`,
+            );
+          }
+          if (policy.failure_mode === "emit_only" && policy.telemetry === "off") {
+            throw new TypeError(
+              "sync write failure mode emit_only requires telemetry errors, lifecycle, or verbose",
+            );
+          }
+          return Object.freeze({
+          '''
+          if text.count(policy_anchor) != 1:
+              raise SystemExit('write-policy validation anchor did not match exactly once')
+          text = text.replace(policy_anchor, policy_replacement, 1)
+
+          error_anchor = '''function errorType(error) {
+            return error instanceof Error && error.name ? error.name : typeof error;
+          }
+          '''
+          error_replacement = '''const SAFE_ERROR_TYPES = new Set([
+            "Error",
+            "TypeError",
+            "RangeError",
+            "ReferenceError",
+            "SyntaxError",
+            "URIError",
+            "EvalError",
+            "AggregateError",
+            "AbortError",
+            "TimeoutError",
+            "NetworkError",
+            "NotAllowedError",
+            "InvalidStateError",
+            "QuotaExceededError",
+            "ConstraintError",
+            "DataError",
+            "OperationError",
+            "UnknownError",
+          ]);
+
+          function errorType(error) {
+            const fallback = error instanceof Error ? "Error" : typeof error;
+            const candidate =
+              error instanceof Error && typeof error.name === "string"
+                ? error.name
+                : fallback;
+            return SAFE_ERROR_TYPES.has(candidate) ? candidate : fallback;
+          }
+          '''
+          if text.count(error_anchor) != 1:
+              raise SystemExit('error-type anchor did not match exactly once')
+          client.write_text(text.replace(error_anchor, error_replacement, 1), encoding='utf-8')
+
+          Path('sdk/src/telemetry.mjs').write_text('''// Optional OpenTelemetry adapter. The sync SDK intentionally has no hard
+          // dependency on an OTel distribution: applications inject the tracer, logger,
+          // and meter from the provider they already configure.
+
+          const ERROR_STATUS = 2;
+          const SEVERITY = Object.freeze({
+            failed: Object.freeze({ number: 17, text: "ERROR" }),
+            retry_scheduled: Object.freeze({ number: 13, text: "WARN" }),
+            conflict_resolved: Object.freeze({ number: 13, text: "WARN" }),
+          });
+
+          function attributes(context) {
+            return {
+              "db.system.name": context.storage ?? "indexeddb",
+              "db.collection.name": context.table,
+              "db.operation.name": context.op,
+              "fiducia.sync.strategy": context.strategy,
+            };
+          }
+
+          function severityFor(phase) {
+            return SEVERITY[phase] ?? { number: 9, text: "INFO" };
+          }
+
+          /**
+           * Adapt OpenTelemetry API-compatible tracer, logger, and meter objects to the
+           * small dependency-free telemetry surface consumed by makeSyncClient().
+           *
+           * Row ids, payloads, idempotency keys, error messages, and arbitrary custom
+           * error names are deliberately not recorded. This keeps cardinality bounded
+           * and avoids leaking customer data.
+           */
+          export function makeOpenTelemetryTelemetry({ tracer, logger, meter } = {}) {
+            let eventCounter;
+            try {
+              eventCounter = meter?.createCounter?.("fiducia.sync.write.events", {
+                description: "Count of bounded Fiducia sync write lifecycle events",
+                unit: "{event}",
+              });
+            } catch {
+              eventCounter = undefined;
+            }
+
+            return {
+              startWrite(context) {
+                const span = tracer?.startSpan?.("fiducia.sync.write", {
+                  attributes: attributes(context),
+                });
+                if (!span) return undefined;
+                return {
+                  event(phase, eventAttributes = {}) {
+                    span.addEvent?.(`fiducia.sync.${phase}`, eventAttributes);
+                  },
+                  error(type) {
+                    span.setAttribute?.("error.type", type);
+                    span.setStatus?.({ code: ERROR_STATUS });
+                  },
+                  end() {
+                    span.end?.();
+                  },
+                };
+              },
+
+              emit(event, context) {
+                const severity = severityFor(event.phase);
+                const eventAttributes = {
+                  ...attributes(context),
+                  "fiducia.sync.phase": event.phase,
+                  "fiducia.sync.attempts": event.attempts ?? 0,
+                  ...(event.error_type ? { "error.type": event.error_type } : {}),
+                };
+                try {
+                  eventCounter?.add?.(1, eventAttributes);
+                } catch {
+                  // A broken metrics exporter must not suppress logs or affect writes.
+                }
+                try {
+                  logger?.emit?.({
+                    severityNumber: severity.number,
+                    severityText: severity.text,
+                    body: `fiducia.sync.${event.phase}`,
+                    attributes: eventAttributes,
+                  });
+                } catch {
+                  // Observability exporters are best-effort and isolated from durability.
+                }
+              },
+            };
+          }
+          ''', encoding='utf-8')
+
+          types = Path('sdk/src/index.d.ts')
+          types_text = types.read_text(encoding='utf-8')
+          logger_anchor = '''  logger?: {
+            emit?(record: {
+          '''
+          meter_block = '''  meter?: {
+            createCounter?(
+              name: string,
+              options?: { description?: string; unit?: string },
+            ): {
+              add?(value: number, attributes?: Record<string, unknown>): void;
+            };
+          };
+          logger?: {
+            emit?(record: {
+          '''
+          if types_text.count(logger_anchor) != 1:
+              raise SystemExit('OpenTelemetry logger type anchor did not match exactly once')
+          types.write_text(types_text.replace(logger_anchor, meter_block, 1), encoding='utf-8')
+
+          readme = Path('sdk/README.md')
+          readme_text = readme.read_text(encoding='utf-8')
+          readme_anchor = '''Every `write()` selects enum values for `strategy`, `failure_mode`, and
+          `telemetry`; a client default, per-table/operation resolver, and per-call
+          override are supported. `optimisticWrite()` and `optimisticDelete()` remain
+          compatibility wrappers. `startSync()` defaults to IndexedDB and accepts
+          '''
+          readme_replacement = '''Every `write()` selects enum values for `strategy`, `failure_mode`, and
+          `telemetry`; a client default, per-table/operation resolver, and per-call
+          override are supported. `emit_only` is rejected when telemetry is `off`, so a
+          failed send can never become both caller-silent and observer-silent. The
+          OpenTelemetry bridge accepts optional tracer, logger, and meter providers; the
+          meter records `fiducia.sync.write.events` with bounded phase/strategy/storage/
+          table/operation attributes, while custom error names collapse to a fixed safe
+          taxonomy. `optimisticWrite()` and `optimisticDelete()` remain compatibility
+          wrappers. `startSync()` defaults to IndexedDB and accepts
+          '''
+          if readme_text.count(readme_anchor) != 1:
+              raise SystemExit('SDK README policy paragraph did not match exactly once')
+          readme.write_text(readme_text.replace(readme_anchor, readme_replacement, 1), encoding='utf-8')
+
+          Path('sdk/tests/outcome-observability.test.mjs').write_text('''import assert from "node:assert/strict";
+          import test from "node:test";
+
+          import { makeSyncClient, SyncWriteError } from "../src/client.mjs";
+
+          function memoryHarness() {
+            const rows = new Map();
+            const metas = new Map();
+            const writes = [];
+            let nextSeq = 1;
+            const key = (table, id) => `${table}:${id}`;
+            const store = {
+              storageKind: "local_storage",
+              async get(table, id) { return rows.get(key(table, id)) ?? null; },
+              async meta(table, id) { return metas.get(key(table, id)) ?? null; },
+              async put(table, id, row, meta) {
+                rows.set(key(table, id), structuredClone(row));
+                metas.set(key(table, id), { ...meta });
+              },
+              async del(table, id) {
+                rows.delete(key(table, id));
+                metas.delete(key(table, id));
+              },
+            };
+            const queue = {
+              async enqueue(write) {
+                const seq = nextSeq++;
+                writes.push({ ...structuredClone(write), seq, attempts: 0 });
+                return seq;
+              },
+              async enqueueOptimistic(write, row) {
+                const seq = await this.enqueue(write);
+                if (write.op === "delete") await store.del(write.table, write.id);
+                else await store.put(write.table, write.id, row, {
+                  version: write.base_version,
+                  dirty: true,
+                });
+                return seq;
+              },
+              async list() { return structuredClone(writes); },
+              async bumpAttempts(seq) {
+                const found = writes.find((write) => write.seq === seq);
+                if (!found) return 0;
+                found.attempts += 1;
+                return found.attempts;
+              },
+            };
+            return { rows, metas, store, queue };
+          }
+
+          const policy = (failure_mode, telemetry = "errors") => ({
+            strategy: "optimistic",
+            failure_mode,
+            telemetry,
+          });
+
+          async function failedWrite(failureMode) {
+            const harness = memoryHarness();
+            const events = [];
+            const client = makeSyncClient({
+              store: harness.store,
+              queue: harness.queue,
+              core: {},
+              telemetry: { emit(event, context) { events.push({ event, context }); } },
+            });
+            const transportError = new Error("tenant-42 secret transport message");
+            transportError.name = "tenant-42/offline-secret";
+            let result;
+            let thrown;
+            try {
+              result = await client.write(
+                "api_keys",
+                "secret-row-id",
+                { token: "secret-payload" },
+                async () => { throw transportError; },
+                { policy: policy(failureMode) },
+              );
+            } catch (error) {
+              thrown = error;
+              result = error.result;
+            }
+            return { ...harness, events, result, thrown };
+          }
+
+          test("all failure modes preserve one durable retry while exposing distinct caller outcomes", async () => {
+            const returned = await failedWrite("return_result");
+            const thrown = await failedWrite("throw_error");
+            const emitted = await failedWrite("emit_only");
+
+            assert.equal(thrown.thrown instanceof SyncWriteError, true);
+            assert.equal(returned.thrown, undefined);
+            assert.equal(emitted.thrown, undefined);
+            assert.match(returned.result.error, /tenant-42 secret transport message/);
+            assert.match(thrown.result.error, /tenant-42 secret transport message/);
+            assert.deepEqual(emitted.result, { status: "queued", attempts: 1 });
+
+            for (const outcome of [returned, thrown, emitted]) {
+              const queued = await outcome.queue.list();
+              assert.equal(queued.length, 1);
+              assert.equal(queued[0].attempts, 1);
+              assert.equal(queued[0].base_version, 0);
+              assert.deepEqual(queued[0].payload, { token: "secret-payload" });
+              assert.deepEqual(await outcome.store.meta("api_keys", "secret-row-id"), {
+                version: 0,
+                dirty: true,
+              });
+              assert.deepEqual(
+                outcome.events.map(({ event }) => event.phase),
+                ["failed", "retry_scheduled"],
+              );
+              assert.deepEqual(
+                outcome.events.map(({ event }) => event.error_type),
+                ["Error", "Error"],
+              );
+              const serialized = JSON.stringify(outcome.events);
+              assert.doesNotMatch(
+                serialized,
+                /secret-row-id|secret-payload|tenant-42|transport message|offline-secret/,
+              );
+            }
+          });
+
+          test("emit_only cannot be combined with telemetry off", async () => {
+            const harness = memoryHarness();
+            let sends = 0;
+            const client = makeSyncClient({
+              store: harness.store,
+              queue: harness.queue,
+              core: {},
+            });
+            await assert.rejects(
+              () => client.write(
+                "api_keys",
+                "k1",
+                { name: "silent" },
+                async () => { sends += 1; throw new Error("offline"); },
+                { policy: policy("emit_only", "off") },
+              ),
+              /emit_only requires telemetry/,
+            );
+            assert.equal(sends, 0);
+            assert.equal((await harness.queue.list()).length, 0);
+            assert.equal(await harness.store.get("api_keys", "k1"), null);
+          });
+          ''', encoding='utf-8')
+
+          Path('sdk/tests/telemetry-metrics.test.mjs').write_text('''import assert from "node:assert/strict";
+          import test from "node:test";
+
+          import { makeOpenTelemetryTelemetry } from "../src/telemetry.mjs";
+
+          const context = {
+            table: "infra_operations",
+            op: "upsert",
+            strategy: "optimistic",
+            storage: "indexeddb",
+          };
+
+          test("OpenTelemetry bridge emits dashboardable bounded metrics and severity", () => {
+            const counters = [];
+            const logs = [];
+            const telemetry = makeOpenTelemetryTelemetry({
+              meter: {
+                createCounter(name, options) {
+                  assert.equal(name, "fiducia.sync.write.events");
+                  assert.equal(options.unit, "{event}");
+                  return { add(value, attributes) { counters.push({ value, attributes }); } };
+                },
+              },
+              logger: { emit(record) { logs.push(record); } },
+            });
+
+            for (const phase of [
+              "acknowledged",
+              "retry_scheduled",
+              "conflict_resolved",
+              "failed",
+            ]) {
+              telemetry.emit(
+                { phase, attempts: 2, error_type: phase === "failed" ? "TypeError" : undefined },
+                context,
+              );
+            }
+
+            assert.equal(counters.length, 4);
+            assert.deepEqual(logs.map(({ severityText }) => severityText), [
+              "INFO", "WARN", "WARN", "ERROR",
+            ]);
+            assert.deepEqual(
+              counters.map(({ attributes }) => attributes["fiducia.sync.phase"]),
+              ["acknowledged", "retry_scheduled", "conflict_resolved", "failed"],
+            );
+            const serialized = JSON.stringify({ counters, logs });
+            assert.doesNotMatch(serialized, /row-id|payload|idempotency|error message/);
+          });
+
+          test("a failing metrics exporter cannot suppress logs", () => {
+            const logs = [];
+            const telemetry = makeOpenTelemetryTelemetry({
+              meter: {
+                createCounter() {
+                  return { add() { throw new Error("metrics backend down"); } };
+                },
+              },
+              logger: { emit(record) { logs.push(record); } },
+            });
+            assert.doesNotThrow(() => telemetry.emit(
+              { phase: "failed", attempts: 1, error_type: "NetworkError" },
+              context,
+            ));
+            assert.equal(logs.length, 1);
+            assert.equal(logs[0].severityText, "ERROR");
+          });
+
+          test("a failing logger remains isolated from the write path", () => {
+            const telemetry = makeOpenTelemetryTelemetry({
+              logger: { emit() { throw new Error("logger backend down"); } },
+            });
+            assert.doesNotThrow(() => telemetry.emit(
+              { phase: "retry_scheduled", attempts: 1, error_type: "TimeoutError" },
+              context,
+            ));
+          });
+          ''', encoding='utf-8')
+          PY
+
+          git rm .github/workflows/materialize-den-1170-outcomes.yml
+          cd sdk
+          npm ci --ignore-scripts
+          node --check src/client.mjs
+          node --check src/telemetry.mjs
+          node --test \
+            tests/outcome-observability.test.mjs \
+            tests/telemetry-metrics.test.mjs \
+            tests/telemetry.test.mjs
+          npm run typecheck
+          cd ..
+          git add \
+            sdk/README.md \
+            sdk/src/client.mjs \
+            sdk/src/index.d.ts \
+            sdk/src/telemetry.mjs \
+            sdk/tests/outcome-observability.test.mjs \
+            sdk/tests/telemetry-metrics.test.mjs
+          git diff --cached --check
+          test "$(git diff --cached --name-only | grep -v '^.github/workflows/' | sort | paste -sd ' ' -)" = "sdk/README.md sdk/src/client.mjs sdk/src/index.d.ts sdk/src/telemetry.mjs sdk/tests/outcome-observability.test.mjs sdk/tests/telemetry-metrics.test.mjs"
+
+      - name: Commit the canonical product change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'feat(DEN-1170): make sync outcomes observable and fail-safe'
+          git push origin HEAD:refs/heads/agent/den-1170-outcome-observability
