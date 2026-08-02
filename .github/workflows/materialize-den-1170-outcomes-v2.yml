@@ -1,0 +1,200 @@
+name: Materialize DEN-1170 outcome observability v2
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-den-1170-outcomes-v2.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-den-1170-outcomes-v2-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/den-1170-outcome-observability'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/den-1170-outcome-observability
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.22.1"
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Materialize with line-stable anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object sdk/src/client.mjs)" = 3b107b89695805cb12acc19737e19574c663e007
+          test "$(git hash-object sdk/src/telemetry.mjs)" = 73ed4194b21a7cd883c42b24a80735623fa5fe41
+          test "$(git hash-object sdk/src/index.d.ts)" = b57383e98e3e49534b6c033d67c3bbd59a58ca6f
+          test "$(git hash-object sdk/README.md)" = 286831b64ea0de86629ad5f8282373ef839dcb79
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          reviewed = Path('.github/workflows/materialize-den-1170-outcomes.yml').read_text(encoding='utf-8')
+
+          def embedded(path):
+              marker = f"Path('{path}').write_text('''"
+              if reviewed.count(marker) != 1:
+                  raise SystemExit(f'embedded {path} marker did not match exactly once')
+              raw = reviewed.split(marker, 1)[1].split("''', encoding='utf-8')", 1)[0]
+              lines = raw.splitlines()
+              normalized = [lines[0]]
+              for line in lines[1:]:
+                  normalized.append(line[10:] if line.startswith('          ') else line)
+              return '\n'.join(normalized)
+
+          client = Path('sdk/src/client.mjs')
+          text = client.read_text(encoding='utf-8')
+          policy_return = '  return Object.freeze({\n    strategy: policy.strategy,\n'
+          policy_insert = (
+              '  if (policy.failure_mode === "emit_only" && policy.telemetry === "off") {\n'
+              '    throw new TypeError(\n'
+              '      "sync write failure mode emit_only requires telemetry errors, lifecycle, or verbose",\n'
+              '    );\n'
+              '  }\n'
+              + policy_return
+          )
+          if text.count(policy_return) != 1:
+              raise SystemExit('write-policy return anchor did not match exactly once')
+          text = text.replace(policy_return, policy_insert, 1)
+
+          error_anchor = (
+              'function errorType(error) {\n'
+              '  return error instanceof Error && error.name ? error.name : typeof error;\n'
+              '}\n'
+          )
+          error_replacement = '''const SAFE_ERROR_TYPES = new Set([
+            "Error",
+            "TypeError",
+            "RangeError",
+            "ReferenceError",
+            "SyntaxError",
+            "URIError",
+            "EvalError",
+            "AggregateError",
+            "AbortError",
+            "TimeoutError",
+            "NetworkError",
+            "NotAllowedError",
+            "InvalidStateError",
+            "QuotaExceededError",
+            "ConstraintError",
+            "DataError",
+            "OperationError",
+            "UnknownError",
+          ]);
+
+          function errorType(error) {
+            const fallback = error instanceof Error ? "Error" : typeof error;
+            const candidate =
+              error instanceof Error && typeof error.name === "string"
+                ? error.name
+                : fallback;
+            return SAFE_ERROR_TYPES.has(candidate) ? candidate : fallback;
+          }
+          '''
+          error_replacement = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in error_replacement.splitlines()
+          ) + '\n'
+          if text.count(error_anchor) != 1:
+              raise SystemExit('error-type anchor did not match exactly once')
+          client.write_text(text.replace(error_anchor, error_replacement, 1), encoding='utf-8')
+
+          Path('sdk/src/telemetry.mjs').write_text(embedded('sdk/src/telemetry.mjs'), encoding='utf-8')
+          Path('sdk/tests/outcome-observability.test.mjs').write_text(
+              embedded('sdk/tests/outcome-observability.test.mjs'), encoding='utf-8'
+          )
+          Path('sdk/tests/telemetry-metrics.test.mjs').write_text(
+              embedded('sdk/tests/telemetry-metrics.test.mjs'), encoding='utf-8'
+          )
+
+          types = Path('sdk/src/index.d.ts')
+          types_text = types.read_text(encoding='utf-8')
+          logger_anchor = '  logger?: {\n    emit?(record: {\n'
+          meter_block = (
+              '  meter?: {\n'
+              '    createCounter?(\n'
+              '      name: string,\n'
+              '      options?: { description?: string; unit?: string },\n'
+              '    ): {\n'
+              '      add?(value: number, attributes?: Record<string, unknown>): void;\n'
+              '    };\n'
+              '  };\n'
+              + logger_anchor
+          )
+          if types_text.count(logger_anchor) != 1:
+              raise SystemExit('OpenTelemetry logger type anchor did not match exactly once')
+          types.write_text(types_text.replace(logger_anchor, meter_block, 1), encoding='utf-8')
+
+          readme = Path('sdk/README.md')
+          readme_text = readme.read_text(encoding='utf-8')
+          readme_anchor = (
+              'Every `write()` selects enum values for `strategy`, `failure_mode`, and\n'
+              '`telemetry`; a client default, per-table/operation resolver, and per-call\n'
+              'override are supported. `optimisticWrite()` and `optimisticDelete()` remain\n'
+              'compatibility wrappers. `startSync()` defaults to IndexedDB and accepts\n'
+          )
+          readme_replacement = (
+              'Every `write()` selects enum values for `strategy`, `failure_mode`, and\n'
+              '`telemetry`; a client default, per-table/operation resolver, and per-call\n'
+              'override are supported. `emit_only` is rejected when telemetry is `off`, so a\n'
+              'failed send can never become both caller-silent and observer-silent. The\n'
+              'OpenTelemetry bridge accepts optional tracer, logger, and meter providers; the\n'
+              'meter records `fiducia.sync.write.events` with bounded phase/strategy/storage/\n'
+              'table/operation attributes, while custom error names collapse to a fixed safe\n'
+              'taxonomy. `optimisticWrite()` and `optimisticDelete()` remain compatibility\n'
+              'wrappers. `startSync()` defaults to IndexedDB and accepts\n'
+          )
+          if readme_text.count(readme_anchor) != 1:
+              raise SystemExit('SDK README policy paragraph did not match exactly once')
+          readme.write_text(readme_text.replace(readme_anchor, readme_replacement, 1), encoding='utf-8')
+          PY
+
+          git rm \
+            .github/workflows/materialize-den-1170-outcomes.yml \
+            .github/workflows/materialize-den-1170-outcomes-v2.yml
+          cd sdk
+          npm ci --ignore-scripts
+          node --check src/client.mjs
+          node --check src/telemetry.mjs
+          node --test \
+            tests/outcome-observability.test.mjs \
+            tests/telemetry-metrics.test.mjs \
+            tests/telemetry.test.mjs
+          npm run typecheck
+          cd ..
+          git add \
+            sdk/README.md \
+            sdk/src/client.mjs \
+            sdk/src/index.d.ts \
+            sdk/src/telemetry.mjs \
+            sdk/tests/outcome-observability.test.mjs \
+            sdk/tests/telemetry-metrics.test.mjs
+          git diff --cached --check
+          test "$(git diff --cached --name-only | grep -v '^.github/workflows/' | sort | paste -sd ' ' -)" = "sdk/README.md sdk/src/client.mjs sdk/src/index.d.ts sdk/src/telemetry.mjs sdk/tests/outcome-observability.test.mjs sdk/tests/telemetry-metrics.test.mjs"
+
+      - name: Commit the canonical product change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'feat(DEN-1170): make sync outcomes observable and fail-safe'
+          git push origin HEAD:refs/heads/agent/den-1170-outcome-observability
