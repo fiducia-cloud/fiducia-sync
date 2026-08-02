@@ -1,0 +1,153 @@
+name: Materialize DEN-1170 Dart outcome parity v7
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-den-1170-dart-parity-v7.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-den-1170-dart-parity-v7-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/den-1170-dart-outcome-parity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/den-1170-dart-outcome-parity
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Execute reviewed v5 product script with structural matcher repairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          source = Path('.github/workflows/materialize-den-1170-dart-parity-v5.yml').read_text(encoding='utf-8')
+          start = "          python3 - <<'PY'\n"
+          end = "\n          PY\n"
+          raw = source.split(start, 1)[1].split(end, 1)[0]
+          lines = raw.splitlines()
+          if any(line and not line.startswith('          ') for line in lines):
+              raise SystemExit('unexpected v5 product script indentation')
+          code = '\n'.join(line[10:] if line else '' for line in lines) + '\n'
+
+          def replace_block(code, start_marker, end_marker, replacement, label):
+              start_index = code.find(start_marker)
+              if start_index < 0:
+                  raise SystemExit(f'{label} start was not found')
+              end_index = code.find(end_marker, start_index)
+              if end_index < 0:
+                  raise SystemExit(f'{label} end was not found')
+              end_index += len(end_marker)
+              return code[:start_index] + replacement + code[end_index:]
+
+          factory_replacement = '''text = replace_once(
+              text,
+              "      );\\n\\n  JsonMap toJson() => {",
+              "      ).validate();\\n\\n  JsonMap toJson() => {",
+              "policy JSON validation",
+          )
+          '''
+          factory_replacement = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in factory_replacement.splitlines()
+          ) + '\n'
+          code = replace_block(
+              code,
+              "text = replace_once(\n    text,\n    '''  factory SyncWritePolicy.fromJson",
+              "    'policy JSON validation',\n)\n",
+              factory_replacement,
+              'factory matcher',
+          )
+
+          policy_replacement = '''text = replace_once(
+              text,
+              "  ]) => override ?? resolveWritePolicy?.call(context) ?? writePolicy;\\n\\n  bool _shouldEmit",
+              "  ]) => (override ?? resolveWritePolicy?.call(context) ?? writePolicy)\\n      .validate();\\n\\n  bool _shouldEmit",
+              "client policy validation",
+          )
+          '''
+          policy_replacement = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in policy_replacement.splitlines()
+          ) + '\n'
+          code = replace_block(
+              code,
+              "text = replace_once(\n    text,\n    '''  SyncWritePolicy _policyFor",
+              "    'client policy validation',\n)\n",
+              policy_replacement,
+              'client policy matcher',
+          )
+
+          emit_replacement = '''text = replace_once(
+              text,
+              "          failureMode: SyncFailureMode.emitOnly,\\n          telemetry: SyncTelemetryLevel.off,",
+              "          failureMode: SyncFailureMode.emitOnly,\\n          telemetry: SyncTelemetryLevel.errors,",
+              "existing emit-only test policy",
+          )
+          '''
+          emit_replacement = '\n'.join(
+              line[10:] if line.startswith('          ') else line
+              for line in emit_replacement.splitlines()
+          ) + '\n'
+          code = replace_block(
+              code,
+              "text = replace_once(\n    text,\n    '''        policy: const SyncWritePolicy(",
+              "    'existing emit-only test policy',\n)\n",
+              emit_replacement,
+              'emit-only matcher',
+          )
+
+          exec(compile(code, '<den-1170-dart-materializer-v7>', 'exec'), {})
+          PY
+
+          git rm \
+            .github/workflows/materialize-den-1170-dart-parity.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v2.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v3.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v4.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v5.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v6.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v7.yml
+          cd dart
+          flutter pub get
+          dart format lib/src/client.dart lib/src/models.dart lib/src/telemetry.dart test/client_test.dart test/telemetry_test.dart
+          flutter analyze
+          flutter test
+          cd ..
+          git add \
+            dart/README.md \
+            dart/lib/src/client.dart \
+            dart/lib/src/models.dart \
+            dart/lib/src/telemetry.dart \
+            dart/test/client_test.dart \
+            dart/test/telemetry_test.dart
+          git diff --cached --check
+          test "$(git diff --cached --name-only | grep -v '^.github/workflows/' | sort | paste -sd ' ' -)" = "dart/README.md dart/lib/src/client.dart dart/lib/src/models.dart dart/lib/src/telemetry.dart dart/test/client_test.dart dart/test/telemetry_test.dart"
+
+      - name: Commit the canonical Dart product change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'feat(DEN-1170): align Dart outcome observability'
+          git push origin HEAD:refs/heads/agent/den-1170-dart-outcome-parity
