@@ -1,0 +1,559 @@
+name: Materialize DEN-1170 Dart outcome parity v5
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths:
+      - .github/workflows/materialize-den-1170-dart-parity-v5.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-den-1170-dart-parity-v5-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'agent/den-1170-dart-outcome-parity'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/den-1170-dart-outcome-parity
+          fetch-depth: 0
+          persist-credentials: true
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Apply exact reviewed Dart product bodies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object dart/lib/src/client.dart)" = b32a2b5ca411e873ec1c214c9525814576a1b505
+          test "$(git hash-object dart/lib/src/models.dart)" = 3ee7ad02105d467b9d1553ee385204e0e74cdd4d
+          test "$(git hash-object dart/lib/src/telemetry.dart)" = 4f0dea1f632c6ba09b93db88e22e35cf5dbcca41
+          test "$(git hash-object dart/test/client_test.dart)" = a27a7c13b57bcfae50f37cbb105bf4d1e51db39c
+          test "$(git hash-object dart/README.md)" = 787a8e4e9829ac160668ec0a4f31ffcf978a0a55
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              if text.count(old) != 1:
+                  raise SystemExit(f'{label} did not match exactly once')
+              return text.replace(old, new, 1)
+
+          models = Path('dart/lib/src/models.dart')
+          text = models.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '  SyncWritePolicy copyWith({\n',
+              '''  SyncWritePolicy validate() {
+            if (failureMode == SyncFailureMode.emitOnly &&
+                telemetry == SyncTelemetryLevel.off) {
+              throw ArgumentError.value(
+                this,
+                'policy',
+                'emitOnly requires telemetry errors, lifecycle, or verbose',
+              );
+            }
+            return this;
+          }
+
+          '''.replace('          ', '') + '  SyncWritePolicy copyWith({\n',
+              'policy validation insertion',
+          )
+          text = replace_once(
+              text,
+              '''  factory SyncWritePolicy.fromJson(Map<String, Object?> json) =>
+              SyncWritePolicy(
+                strategy: SyncWriteStrategy.fromWire(json['strategy']),
+                failureMode: SyncFailureMode.fromWire(json['failure_mode']),
+                telemetry: SyncTelemetryLevel.fromWire(json['telemetry']),
+              );
+          '''.replace('          ', ''),
+              '''  factory SyncWritePolicy.fromJson(Map<String, Object?> json) =>
+              SyncWritePolicy(
+                strategy: SyncWriteStrategy.fromWire(json['strategy']),
+                failureMode: SyncFailureMode.fromWire(json['failure_mode']),
+                telemetry: SyncTelemetryLevel.fromWire(json['telemetry']),
+              ).validate();
+          '''.replace('          ', ''),
+              'policy JSON validation',
+          )
+          models.write_text(text, encoding='utf-8')
+
+          client = Path('dart/lib/src/client.dart')
+          text = client.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'typedef ResolveWritePolicy = SyncWritePolicy Function(SyncWriteContext context);\n\n',
+              '''typedef ResolveWritePolicy = SyncWritePolicy Function(SyncWriteContext context);
+
+          const _safeErrorTypes = <String>{
+            'Exception',
+            'Error',
+            'ArgumentError',
+            'RangeError',
+            'StateError',
+            'UnsupportedError',
+            'UnimplementedError',
+            'FormatException',
+            'TimeoutException',
+            'SocketException',
+            'HttpException',
+            'HandshakeException',
+            'TlsException',
+            'WebSocketException',
+            'FileSystemException',
+            'OSError',
+            'ConcurrentModificationError',
+            'OutOfMemoryError',
+            'StackOverflowError',
+          };
+
+          String _errorType(Object error) {
+            final candidate = error.runtimeType.toString();
+            return _safeErrorTypes.contains(candidate) ? candidate : 'Error';
+          }
+
+          '''.replace('          ', ''),
+              'bounded error taxonomy insertion',
+          )
+          text = replace_once(
+              text,
+              '''  SyncWritePolicy _policyFor(
+                SyncWriteContext context, [
+                SyncWritePolicy? override,
+              ]) => override ?? resolveWritePolicy?.call(context) ?? writePolicy;
+          '''.replace('          ', ''),
+              '''  SyncWritePolicy _policyFor(
+                SyncWriteContext context, [
+                SyncWritePolicy? override,
+              ]) => (override ?? resolveWritePolicy?.call(context) ?? writePolicy)
+                  .validate();
+          '''.replace('          ', ''),
+              'client policy validation',
+          )
+          text = replace_once(
+              text,
+              '      final errorType = error.runtimeType.toString();\n',
+              '      final errorType = _errorType(error);\n',
+              'bounded error type use',
+          )
+          client.write_text(text, encoding='utf-8')
+
+          Path('dart/lib/src/telemetry.dart').write_text('''import 'models.dart';
+
+          final class SyncTelemetryContext {
+            const SyncTelemetryContext({
+              required this.table,
+              required this.operation,
+              required this.strategy,
+              this.storage = 'sqlite',
+            });
+
+            final String table;
+            final ChangeOperation operation;
+            final SyncWriteStrategy strategy;
+            final String storage;
+
+            Map<String, Object> get attributes => {
+              'db.system.name': storage,
+              'db.collection.name': table,
+              'db.operation.name': operation.name,
+              'fiducia.sync.strategy': strategy.wireName,
+            };
+          }
+
+          enum SyncTelemetryPhase {
+            localQueued('local_queued'),
+            sendStarted('send_started'),
+            acknowledged('acknowledged'),
+            retryScheduled('retry_scheduled'),
+            failed('failed'),
+            conflictResolved('conflict_resolved');
+
+            const SyncTelemetryPhase(this.wireName);
+            final String wireName;
+
+            SyncTelemetrySeverity get severity => switch (this) {
+              SyncTelemetryPhase.failed => SyncTelemetrySeverity.error,
+              SyncTelemetryPhase.retryScheduled ||
+              SyncTelemetryPhase.conflictResolved => SyncTelemetrySeverity.warning,
+              _ => SyncTelemetrySeverity.info,
+            };
+          }
+
+          enum SyncTelemetrySeverity { info, warning, error }
+
+          final class SyncTelemetryEvent {
+            const SyncTelemetryEvent({
+              required this.phase,
+              required this.strategy,
+              required this.table,
+              required this.operation,
+              required this.atMs,
+              this.attempts,
+              this.errorType,
+            });
+
+            final SyncTelemetryPhase phase;
+            final SyncWriteStrategy strategy;
+            final String table;
+            final ChangeOperation operation;
+            final int atMs;
+            final int? attempts;
+            final String? errorType;
+          }
+
+          abstract interface class SyncTelemetrySpan {
+            void event(
+              SyncTelemetryPhase phase, [
+              Map<String, Object> attributes = const {},
+            ]);
+            void error(String errorType);
+            void end();
+          }
+
+          abstract interface class SyncTelemetry {
+            SyncTelemetrySpan? startWrite(SyncTelemetryContext context);
+            void emit(SyncTelemetryEvent event, SyncTelemetryContext context);
+          }
+
+          typedef StartOpenTelemetrySpan =
+              SyncTelemetrySpan? Function(String name, Map<String, Object> attributes);
+          typedef EmitOpenTelemetryLog =
+              void Function(
+                String body,
+                Map<String, Object> attributes, {
+                required bool error,
+              });
+          typedef EmitOpenTelemetryLogRecord =
+              void Function(
+                String body,
+                Map<String, Object> attributes, {
+                required SyncTelemetrySeverity severity,
+              });
+          typedef RecordOpenTelemetryMetric =
+              void Function(
+                String name,
+                num value,
+                Map<String, Object> attributes,
+              );
+
+          /// Dependency-free bridge to the application's configured OpenTelemetry SDK.
+          ///
+          /// The callbacks receive semantic-convention-compatible, low-cardinality
+          /// attributes. Row ids, payloads, write keys, error messages, and arbitrary
+          /// custom exception names are excluded. [emitLog] remains available for
+          /// compatibility; [emitLogRecord] adds INFO/WARNING/ERROR severity and takes
+          /// precedence when both callbacks are supplied.
+          final class OpenTelemetrySyncTelemetry implements SyncTelemetry {
+            const OpenTelemetrySyncTelemetry({
+              this.startSpan,
+              this.emitLog,
+              this.emitLogRecord,
+              this.recordMetric,
+            });
+
+            final StartOpenTelemetrySpan? startSpan;
+            final EmitOpenTelemetryLog? emitLog;
+            final EmitOpenTelemetryLogRecord? emitLogRecord;
+            final RecordOpenTelemetryMetric? recordMetric;
+
+            @override
+            SyncTelemetrySpan? startWrite(SyncTelemetryContext context) =>
+                startSpan?.call('fiducia.sync.write', context.attributes);
+
+            @override
+            void emit(SyncTelemetryEvent event, SyncTelemetryContext context) {
+              final attributes = <String, Object>{
+                ...context.attributes,
+                'fiducia.sync.phase': event.phase.wireName,
+                'fiducia.sync.attempts': event.attempts ?? 0,
+                if (event.errorType != null) 'error.type': event.errorType!,
+              };
+              try {
+                recordMetric?.call('fiducia.sync.write.events', 1, attributes);
+              } on Object {
+                // A broken metrics exporter must not suppress logs or writes.
+              }
+              final structured = emitLogRecord;
+              if (structured != null) {
+                try {
+                  structured(
+                    'fiducia.sync.${event.phase.wireName}',
+                    attributes,
+                    severity: event.phase.severity,
+                  );
+                } on Object {
+                  // Observability exporters are isolated from durable writes.
+                }
+                return;
+              }
+              try {
+                emitLog?.call(
+                  'fiducia.sync.${event.phase.wireName}',
+                  attributes,
+                  error: event.phase == SyncTelemetryPhase.failed,
+                );
+              } on Object {
+                // Legacy exporters are best-effort too.
+              }
+            }
+          }
+          '''.replace('          ', ''), encoding='utf-8')
+
+          tests = Path('dart/test/client_test.dart')
+          text = tests.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '''        policy: const SyncWritePolicy(
+                  failureMode: SyncFailureMode.emitOnly,
+                  telemetry: SyncTelemetryLevel.off,
+                ),
+          '''.replace('          ', ''),
+              '''        policy: const SyncWritePolicy(
+                  failureMode: SyncFailureMode.emitOnly,
+                  telemetry: SyncTelemetryLevel.errors,
+                ),
+          '''.replace('          ', ''),
+              'existing emit-only test policy',
+          )
+          text = replace_once(
+              text,
+              'final class _TestTelemetry implements SyncTelemetry {\n',
+              'final class _SensitiveTenantException implements Exception {}\n\nfinal class _TestTelemetry implements SyncTelemetry {\n',
+              'sensitive test exception insertion',
+          )
+          marker = "  test(\n    'telemetry remains low-cardinality and omits row identity and payload',\n"
+          additions = '''  test('emit-only with telemetry off fails before queue or send', () async {
+            final client = await openClient();
+            var sends = 0;
+            await expectLater(
+              client.write(
+                table: 'items',
+                id: 'silent',
+                row: const {'id': 'silent'},
+                send: (_) async {
+                  sends += 1;
+                  throw StateError('offline');
+                },
+                policy: const SyncWritePolicy(
+                  failureMode: SyncFailureMode.emitOnly,
+                  telemetry: SyncTelemetryLevel.off,
+                ),
+              ),
+              throwsArgumentError,
+            );
+            expect(sends, 0);
+            expect(await client.store.queuedWrites(), isEmpty);
+            expect(await client.store.read('items', 'silent'), isNull);
+            await client.close();
+          });
+
+          test('custom exception names collapse to the bounded Error type', () async {
+            final telemetry = _TestTelemetry();
+            final store = await SqliteSyncStore.open(
+              inMemoryDatabasePath,
+              factory: databaseFactoryFfi,
+            );
+            final client = FiduciaSyncClient(store: store, telemetry: telemetry);
+            await client.write(
+              table: 'items',
+              id: 'secret-row-id',
+              row: const {'token': 'secret-payload'},
+              send: (_) async => throw _SensitiveTenantException(),
+            );
+            expect(
+              telemetry.events.map((event) => event.errorType).whereType<String>(),
+              everyElement('Error'),
+            );
+            expect(telemetry.events.toString(), isNot(contains('SensitiveTenant')));
+            await client.close();
+          });
+
+          '''.replace('          ', '')
+          text = replace_once(text, marker, additions + marker, 'new client tests insertion')
+          tests.write_text(text, encoding='utf-8')
+
+          Path('dart/test/telemetry_test.dart').write_text('''import 'package:fiducia_sync/fiducia_sync.dart';
+          import 'package:flutter_test/flutter_test.dart';
+
+          void main() {
+            const context = SyncTelemetryContext(
+              table: 'infra_operations',
+              operation: ChangeOperation.upsert,
+              strategy: SyncWriteStrategy.optimistic,
+            );
+
+            test('OpenTelemetry bridge records bounded metrics and severity', () {
+              final metrics = <Map<String, Object>>[];
+              final severities = <SyncTelemetrySeverity>[];
+              final telemetry = OpenTelemetrySyncTelemetry(
+                recordMetric: (name, value, attributes) {
+                  metrics.add({
+                    'name': name,
+                    'value': value,
+                    'attributes': attributes,
+                  });
+                },
+                emitLogRecord: (body, attributes, {required severity}) {
+                  severities.add(severity);
+                },
+              );
+
+              for (final phase in [
+                SyncTelemetryPhase.acknowledged,
+                SyncTelemetryPhase.retryScheduled,
+                SyncTelemetryPhase.conflictResolved,
+                SyncTelemetryPhase.failed,
+              ]) {
+                telemetry.emit(
+                  SyncTelemetryEvent(
+                    phase: phase,
+                    strategy: SyncWriteStrategy.optimistic,
+                    table: 'infra_operations',
+                    operation: ChangeOperation.upsert,
+                    atMs: 1,
+                    attempts: 2,
+                    errorType: phase == SyncTelemetryPhase.failed
+                        ? 'StateError'
+                        : null,
+                  ),
+                  context,
+                );
+              }
+
+              expect(metrics, hasLength(4));
+              expect(
+                metrics.map((metric) => metric['name']),
+                everyElement('fiducia.sync.write.events'),
+              );
+              expect(severities, [
+                SyncTelemetrySeverity.info,
+                SyncTelemetrySeverity.warning,
+                SyncTelemetrySeverity.warning,
+                SyncTelemetrySeverity.error,
+              ]);
+              final rendered = {'metrics': metrics}.toString();
+              expect(rendered, isNot(contains('row-id')));
+              expect(rendered, isNot(contains('payload')));
+              expect(rendered, isNot(contains('error message')));
+            });
+
+            test('broken metric exporter cannot suppress structured logs', () {
+              final logs = <String>[];
+              final telemetry = OpenTelemetrySyncTelemetry(
+                recordMetric: (_, _, _) => throw StateError('metrics down'),
+                emitLogRecord: (body, _, {required severity}) {
+                  logs.add('$body:${severity.name}');
+                },
+              );
+              expect(
+                () => telemetry.emit(
+                  const SyncTelemetryEvent(
+                    phase: SyncTelemetryPhase.failed,
+                    strategy: SyncWriteStrategy.optimistic,
+                    table: 'infra_operations',
+                    operation: ChangeOperation.upsert,
+                    atMs: 1,
+                    attempts: 1,
+                    errorType: 'StateError',
+                  ),
+                  context,
+                ),
+                returnsNormally,
+              );
+              expect(logs, ['fiducia.sync.failed:error']);
+            });
+
+            test('legacy boolean log callback remains compatible', () {
+              final errors = <bool>[];
+              final telemetry = OpenTelemetrySyncTelemetry(
+                emitLog: (_, _, {required error}) => errors.add(error),
+              );
+              telemetry.emit(
+                const SyncTelemetryEvent(
+                  phase: SyncTelemetryPhase.retryScheduled,
+                  strategy: SyncWriteStrategy.optimistic,
+                  table: 'infra_operations',
+                  operation: ChangeOperation.upsert,
+                  atMs: 1,
+                ),
+                context,
+              );
+              telemetry.emit(
+                const SyncTelemetryEvent(
+                  phase: SyncTelemetryPhase.failed,
+                  strategy: SyncWriteStrategy.optimistic,
+                  table: 'infra_operations',
+                  operation: ChangeOperation.upsert,
+                  atMs: 2,
+                ),
+                context,
+              );
+              expect(errors, [false, true]);
+            });
+          }
+          '''.replace('          ', ''), encoding='utf-8')
+
+          readme = Path('dart/README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '''The OpenTelemetry bridge emits low-cardinality lifecycle data and excludes row
+          ids, payloads, write keys, and error messages. Replica `createdAtMs`,
+          '''.replace('          ', ''),
+              '''`emitOnly` requires `errors`, `lifecycle`, or `verbose` telemetry so a failed
+          send cannot become both caller-silent and observer-silent. The OpenTelemetry
+          bridge emits low-cardinality lifecycle data, supports a dashboardable
+          `fiducia.sync.write.events` metric callback and structured INFO/WARNING/ERROR
+          logs, preserves the legacy boolean log callback, and excludes row ids,
+          payloads, write keys, error messages, and arbitrary custom exception names.
+          Replica `createdAtMs`,
+          '''.replace('          ', ''),
+              'Dart README outcome contract',
+          )
+          readme.write_text(text, encoding='utf-8')
+          PY
+
+          git rm \
+            .github/workflows/materialize-den-1170-dart-parity.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v2.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v3.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v4.yml \
+            .github/workflows/materialize-den-1170-dart-parity-v5.yml
+          cd dart
+          flutter pub get
+          dart format lib/src/client.dart lib/src/models.dart lib/src/telemetry.dart test/client_test.dart test/telemetry_test.dart
+          flutter analyze
+          flutter test
+          cd ..
+          git add \
+            dart/README.md \
+            dart/lib/src/client.dart \
+            dart/lib/src/models.dart \
+            dart/lib/src/telemetry.dart \
+            dart/test/client_test.dart \
+            dart/test/telemetry_test.dart
+          git diff --cached --check
+          test "$(git diff --cached --name-only | grep -v '^.github/workflows/' | sort | paste -sd ' ' -)" = "dart/README.md dart/lib/src/client.dart dart/lib/src/models.dart dart/lib/src/telemetry.dart dart/test/client_test.dart dart/test/telemetry_test.dart"
+
+      - name: Commit the canonical Dart product change
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'feat(DEN-1170): align Dart outcome observability'
+          git push origin HEAD:refs/heads/agent/den-1170-dart-outcome-parity
