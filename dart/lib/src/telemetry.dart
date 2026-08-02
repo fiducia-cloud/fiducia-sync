@@ -31,7 +31,16 @@ enum SyncTelemetryPhase {
 
   const SyncTelemetryPhase(this.wireName);
   final String wireName;
+
+  SyncTelemetrySeverity get severity => switch (this) {
+    SyncTelemetryPhase.failed => SyncTelemetrySeverity.error,
+    SyncTelemetryPhase.retryScheduled ||
+    SyncTelemetryPhase.conflictResolved => SyncTelemetrySeverity.warning,
+    _ => SyncTelemetrySeverity.info,
+  };
 }
+
+enum SyncTelemetrySeverity { info, warning, error }
 
 final class SyncTelemetryEvent {
   const SyncTelemetryEvent({
@@ -75,16 +84,34 @@ typedef EmitOpenTelemetryLog =
       Map<String, Object> attributes, {
       required bool error,
     });
+typedef EmitOpenTelemetryLogRecord =
+    void Function(
+      String body,
+      Map<String, Object> attributes, {
+      required SyncTelemetrySeverity severity,
+    });
+typedef RecordOpenTelemetryMetric =
+    void Function(String name, num value, Map<String, Object> attributes);
 
 /// Dependency-free bridge to the application's configured OpenTelemetry SDK.
 ///
 /// The callbacks receive semantic-convention-compatible, low-cardinality
-/// attributes. Row ids, payloads, write keys, and error messages are excluded.
+/// attributes. Row ids, payloads, write keys, error messages, and arbitrary
+/// custom exception names are excluded. [emitLog] remains available for
+/// compatibility; [emitLogRecord] adds INFO/WARNING/ERROR severity and takes
+/// precedence when both callbacks are supplied.
 final class OpenTelemetrySyncTelemetry implements SyncTelemetry {
-  const OpenTelemetrySyncTelemetry({this.startSpan, this.emitLog});
+  const OpenTelemetrySyncTelemetry({
+    this.startSpan,
+    this.emitLog,
+    this.emitLogRecord,
+    this.recordMetric,
+  });
 
   final StartOpenTelemetrySpan? startSpan;
   final EmitOpenTelemetryLog? emitLog;
+  final EmitOpenTelemetryLogRecord? emitLogRecord;
+  final RecordOpenTelemetryMetric? recordMetric;
 
   @override
   SyncTelemetrySpan? startWrite(SyncTelemetryContext context) =>
@@ -92,15 +119,38 @@ final class OpenTelemetrySyncTelemetry implements SyncTelemetry {
 
   @override
   void emit(SyncTelemetryEvent event, SyncTelemetryContext context) {
-    emitLog?.call(
-      'fiducia.sync.${event.phase.wireName}',
-      {
-        ...context.attributes,
-        'fiducia.sync.phase': event.phase.wireName,
-        'fiducia.sync.attempts': event.attempts ?? 0,
-        if (event.errorType != null) 'error.type': event.errorType!,
-      },
-      error: event.phase == SyncTelemetryPhase.failed,
-    );
+    final attributes = <String, Object>{
+      ...context.attributes,
+      'fiducia.sync.phase': event.phase.wireName,
+      'fiducia.sync.attempts': event.attempts ?? 0,
+      if (event.errorType != null) 'error.type': event.errorType!,
+    };
+    try {
+      recordMetric?.call('fiducia.sync.write.events', 1, attributes);
+    } on Object {
+      // A broken metrics exporter must not suppress logs or writes.
+    }
+    final structured = emitLogRecord;
+    if (structured != null) {
+      try {
+        structured(
+          'fiducia.sync.${event.phase.wireName}',
+          attributes,
+          severity: event.phase.severity,
+        );
+      } on Object {
+        // Observability exporters are isolated from durable writes.
+      }
+      return;
+    }
+    try {
+      emitLog?.call(
+        'fiducia.sync.${event.phase.wireName}',
+        attributes,
+        error: event.phase == SyncTelemetryPhase.failed,
+      );
+    } on Object {
+      // Legacy exporters are best-effort too.
+    }
   }
 }

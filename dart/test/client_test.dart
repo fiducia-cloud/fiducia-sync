@@ -22,6 +22,8 @@ final class _TestSpan implements SyncTelemetrySpan {
   }
 }
 
+final class _SensitiveTenantException implements Exception {}
+
 final class _TestTelemetry implements SyncTelemetry {
   final contexts = <SyncTelemetryContext>[];
   final events = <SyncTelemetryEvent>[];
@@ -179,7 +181,7 @@ void main() {
         send: offline,
         policy: const SyncWritePolicy(
           failureMode: SyncFailureMode.emitOnly,
-          telemetry: SyncTelemetryLevel.off,
+          telemetry: SyncTelemetryLevel.errors,
         ),
       );
       expect(emitted.attempts, 1);
@@ -188,6 +190,52 @@ void main() {
       await client.close();
     },
   );
+
+  test('emit-only with telemetry off fails before queue or send', () async {
+    final client = await openClient();
+    var sends = 0;
+    await expectLater(
+      client.write(
+        table: 'items',
+        id: 'silent',
+        row: const {'id': 'silent'},
+        send: (_) async {
+          sends += 1;
+          throw StateError('offline');
+        },
+        policy: const SyncWritePolicy(
+          failureMode: SyncFailureMode.emitOnly,
+          telemetry: SyncTelemetryLevel.off,
+        ),
+      ),
+      throwsArgumentError,
+    );
+    expect(sends, 0);
+    expect(await client.store.queuedWrites(), isEmpty);
+    expect(await client.store.read('items', 'silent'), isNull);
+    await client.close();
+  });
+
+  test('custom exception names collapse to the bounded Error type', () async {
+    final telemetry = _TestTelemetry();
+    final store = await SqliteSyncStore.open(
+      inMemoryDatabasePath,
+      factory: databaseFactoryFfi,
+    );
+    final client = FiduciaSyncClient(store: store, telemetry: telemetry);
+    await client.write(
+      table: 'items',
+      id: 'secret-row-id',
+      row: const {'token': 'secret-payload'},
+      send: (_) async => throw _SensitiveTenantException(),
+    );
+    expect(
+      telemetry.events.map((event) => event.errorType).whereType<String>(),
+      everyElement('Error'),
+    );
+    expect(telemetry.events.toString(), isNot(contains('SensitiveTenant')));
+    await client.close();
+  });
 
   test(
     'telemetry remains low-cardinality and omits row identity and payload',
