@@ -348,6 +348,14 @@ export function makeOpenTelemetryTelemetry(options?: {
       end?(): void;
     };
   };
+  meter?: {
+    createCounter?(
+      name: string,
+      options?: { description?: string; unit?: string },
+    ): {
+      add?(value: number, attributes?: Record<string, unknown>): void;
+    };
+  };
   logger?: {
     emit?(record: {
       severityNumber: number;

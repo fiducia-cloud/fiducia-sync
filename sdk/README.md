@@ -25,8 +25,13 @@ callbacks backed by the canonical `fiducia-interfaces` envelopes.
 
 Every `write()` selects enum values for `strategy`, `failure_mode`, and
 `telemetry`; a client default, per-table/operation resolver, and per-call
-override are supported. `optimisticWrite()` and `optimisticDelete()` remain
-compatibility wrappers. `startSync()` defaults to IndexedDB and accepts
+override are supported. `emit_only` is rejected when telemetry is `off`, so a
+failed send can never become both caller-silent and observer-silent. The
+OpenTelemetry bridge accepts optional tracer, logger, and meter providers; the
+meter records `fiducia.sync.write.events` with bounded phase/strategy/storage/
+table/operation attributes, while custom error names collapse to a fixed safe
+taxonomy. `optimisticWrite()` and `optimisticDelete()` remain compatibility
+wrappers. `startSync()` defaults to IndexedDB and accepts
 `persistence: "local_storage"` or the explicit
 `"indexeddb_with_local_storage_fallback"` mode for constrained WebViews.
 
