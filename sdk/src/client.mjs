@@ -48,6 +48,11 @@ function validateWritePolicy(policy) {
       `unsupported sync write telemetry level: ${policy.telemetry}`,
     );
   }
+  if (policy.failure_mode === "emit_only" && policy.telemetry === "off") {
+    throw new TypeError(
+      "sync write failure mode emit_only requires telemetry errors, lifecycle, or verbose",
+    );
+  }
   return Object.freeze({
     strategy: policy.strategy,
     failure_mode: policy.failure_mode,
@@ -55,8 +60,34 @@ function validateWritePolicy(policy) {
   });
 }
 
+const SAFE_ERROR_TYPES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "URIError",
+  "EvalError",
+  "AggregateError",
+  "AbortError",
+  "TimeoutError",
+  "NetworkError",
+  "NotAllowedError",
+  "InvalidStateError",
+  "QuotaExceededError",
+  "ConstraintError",
+  "DataError",
+  "OperationError",
+  "UnknownError",
+]);
+
 function errorType(error) {
-  return error instanceof Error && error.name ? error.name : typeof error;
+  const fallback = error instanceof Error ? "Error" : typeof error;
+  const candidate =
+    error instanceof Error && typeof error.name === "string"
+      ? error.name
+      : fallback;
+  return SAFE_ERROR_TYPES.has(candidate) ? candidate : fallback;
 }
 
 /**
