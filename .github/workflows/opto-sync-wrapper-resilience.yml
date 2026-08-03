@@ -1,0 +1,13 @@
+name: opto-sync wrapper resilience
+
+on:
+  pull_request:
+    paths: ['.zpkg.toml', '.zpkg.lock', 'opto-sync-adapter.json', '.github/workflows/opto-sync-wrapper-resilience.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wrapper-resilience:
+    uses: opto-sync/opto-sync-e2e/.github/workflows/downstream-wrapper-reusable.yml@dcf5ee5d15e4ed6aeb24952b296947b4ffb39e88
