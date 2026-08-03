@@ -16,17 +16,11 @@ tag_format = "v{version}"
 smoke_test = "test -f \"$ZED_PKG_TEST_TARGET/Cargo.toml\" && test -f \"$ZED_PKG_TEST_TARGET/sdk/package.json\" && test -f \"$ZED_PKG_TEST_TARGET/dart/pubspec.yaml\" && test -f \"$ZED_PKG_TEST_TARGET/crates/postgres/Cargo.toml\""
 exclude = [".env", ".env.*", ".direnv/**", ".zed/**", ".zed-pack/**", "tmp/**", "**/*.log", ".DS_Store", "**/target/**", "**/node_modules/**", "**/.dart_tool/**", "sdk/pkg/**"]
 
-[targets.repository]
-dir = "."
-name = "fiducia-sync-repository"
-
+# The root Rust/WASM core owns the complete repository artifact. Its separate
+# Postgres crate and client runtimes keep isolated release roots below it.
 [targets.rust]
 dir = "."
 adapter = "rust"
-
-[targets.rust.native]
-registry = "crates-io"
-package = "fiducia-sync-core"
 
 [targets.rust-postgres]
 dir = "crates/postgres"
