@@ -1,0 +1,40 @@
+name: DEN-1576 retarget final Zed pins
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: [.github/workflows/den-1576-retarget.yml]
+permissions: {contents: write}
+concurrency: {group: 'den-1576-retarget-${{ github.event.pull_request.number }}', cancel-in-progress: true}
+env:
+  EXPECTED_BRANCH: agent/den-1387-opto-sync-zed-adapter
+  TARGET_FILE: .github/workflows/opto-sync-wrapper.yml
+  ZED_CLI_SHA: a850dbcc799aeaccf1093741ab58439a049c14c9
+  ZED_INTERFACES_SHA: c2e049006453c26ca8ca291783f681fce75cb01f
+jobs:
+  retarget:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/den-1387-opto-sync-zed-adapter'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.event.pull_request.head.ref }}', fetch-depth: 0}
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os,pathlib,re
+          path=pathlib.Path(os.environ['TARGET_FILE']); text=path.read_text(); pairs={'ZED_CLI_SHA':os.environ['ZED_CLI_SHA'],'ZED_INTERFACES_SHA':os.environ['ZED_INTERFACES_SHA']}
+          for name,value in pairs.items(): text,count=re.subn(rf'(?m)^(\s*{name}:\s*)[0-9a-f]{{40}}\s*$',rf'\g<1>{value}',text); assert count==1,(name,count)
+          path.write_text(text)
+          for name,value in pairs.items(): assert text.count(f'{name}: {value}')==1
+          for old in ('c636fb8f6b08695c6b4fe94e2481f4d57270b2d7','dc0e0a0620b9462817950b552d3d334a184b1cb1','415e871b1fb3dd97744c134351408a3224805dfb','cc5ed7339672543c734c5f1fd19f7e017a771854'): assert old not in text
+          PY
+          rm .github/workflows/den-1576-retarget.yml
+          mapfile -t changed < <(git diff --name-only); test ${#changed[@]} -eq 2
+          printf '%s\n' "${changed[@]}" | grep -Fx "$TARGET_FILE"
+          printf '%s\n' "${changed[@]}" | grep -Fx '.github/workflows/den-1576-retarget.yml'
+          git config user.name opto-sync-fleet-pin-bot; git config user.email opto-sync-fleet-pin-bot@users.noreply.github.com
+          git add -A -- "$TARGET_FILE" .github/workflows/den-1576-retarget.yml
+          git commit -m 'DEN-1576 pin final Zed package-plane contract'
+          git push origin "HEAD:$EXPECTED_BRANCH"
