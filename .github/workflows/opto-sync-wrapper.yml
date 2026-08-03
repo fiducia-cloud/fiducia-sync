@@ -1,0 +1,91 @@
+name: opto-sync wrapper contract
+
+on:
+  pull_request:
+    paths: ['.zpkg.toml', '.zpkg.lock', 'opto-sync-adapter.json', '.github/workflows/opto-sync-wrapper.yml']
+  workflow_dispatch:
+    inputs:
+      live_install:
+        description: Resolve and inspect the certified Zed artifact
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  ZED_CLI_SHA: c636fb8f6b08695c6b4fe94e2481f4d57270b2d7
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: {persist-credentials: false}
+      - name: Validate staged dependency and adapter boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, tomllib
+          root = pathlib.Path('.')
+          manifest = tomllib.loads((root / '.zpkg.toml').read_text())
+          lock = (root / '.zpkg.lock').read_text().strip()
+          profile = json.loads((root / 'opto-sync-adapter.json').read_text())
+          assert manifest['dependencies']['opto-sync/opto-sync-clients'] == '^0.2.0'
+          assert manifest['install']['dir'] == 'zed_modules'
+          assert profile['repository'] == os.environ['GITHUB_REPOSITORY']
+          assert profile['dependency'] == {'package': 'opto-sync/opto-sync-clients', 'range': '^0.2.0', 'installRoot': 'zed_modules/opto-sync/opto-sync-clients'}
+          assert profile['e2eRepository'].endswith('-e2e')
+          assert profile['wrapperRetains'] and profile['delegatesToOptoSync']
+          assert all(profile['invariants'][key] is True for key in ('renderLocalView', 'realtimeIsWakeHint', 'serverCursorIsAuthoritative', 'mutableGitRefsForbidden', 'removeBespokeCoreOnlyAfterParity'))
+          known = {'rust': ('opto-sync-client', 'clients/rust'), 'typescript': ('@opto-sync/client', 'clients/ts'), 'dart': ('opto_sync_client', 'clients/dart'), 'gleam': ('opto_sync_client', 'clients/gleam')}
+          for language, adapter in profile['nativeAdapters'].items():
+              package, suffix = known[language]
+              assert adapter['package'] == package and adapter['path'].endswith(suffix)
+              assert '..' not in pathlib.PurePosixPath(adapter['path']).parts
+          if profile['releaseState'] == 'blocked-until-certified-package-published':
+              assert lock == 'version = 1'
+          else:
+              assert 'opto-sync/opto-sync-clients' in lock and 'sha256' in lock
+          serialized = json.dumps(profile).lower()
+          assert all(value not in serialized for value in ('refs/heads/main', 'branch = "main"', 'latest'))
+          planes = profile.get('planes')
+          if planes:
+              assert planes['customer']['localDatabase'] != planes['admin']['localDatabase']
+              assert planes['customer']['supabaseProject'] != planes['admin']['supabaseProject']
+          PY
+
+  live-install:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_install }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: {persist-credentials: false}
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ env.ZED_CLI_SHA }}
+          path: .zed-cli
+          persist-credentials: false
+      - run: cargo build --locked --release --manifest-path .zed-cli/Cargo.toml --bin zed
+      - name: Resolve certified package and inspect native targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.zed-cli/target/release/zed" install
+          python3 - <<'PY'
+          import json, pathlib
+          profile = json.loads(pathlib.Path('opto-sync-adapter.json').read_text())
+          expected = {'rust': 'Cargo.toml', 'typescript': 'package.json', 'dart': 'pubspec.yaml', 'gleam': 'gleam.toml'}
+          for language, adapter in profile['nativeAdapters'].items():
+              target = pathlib.Path(adapter['path']) / expected[language]
+              assert target.is_file(), f'missing installed adapter: {target}'
+          lock = pathlib.Path('.zpkg.lock').read_text()
+          assert 'opto-sync/opto-sync-clients' in lock and 'sha256' in lock
+          PY

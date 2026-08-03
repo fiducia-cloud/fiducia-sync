@@ -1,0 +1,38 @@
+{
+  "$schema": "https://opto-sync.dev/schemas/downstream-adapter-v1.json",
+  "schemaVersion": 1,
+  "repository": "fiducia-cloud/fiducia-sync",
+  "e2eRepository": "fiducia-cloud/fiducia-e2e",
+  "rolloutIssue": "DEN-1387",
+  "releaseGate": "DEN-309",
+  "releaseState": "blocked-until-certified-package-published",
+  "dependency": {"package": "opto-sync/opto-sync-clients", "range": "^0.2.0", "installRoot": "zed_modules/opto-sync/opto-sync-clients"},
+  "nativeAdapters": {
+    "rust": {"package": "opto-sync-client", "path": "zed_modules/opto-sync/opto-sync-clients/clients/rust"},
+    "typescript": {"package": "@opto-sync/client", "path": "zed_modules/opto-sync/opto-sync-clients/clients/ts"},
+    "dart": {"package": "opto_sync_client", "path": "zed_modules/opto-sync/opto-sync-clients/clients/dart"}
+  },
+  "persistence": {"web": ["indexeddb", "localstorage-fallback"], "mobile": ["sqlite"], "backend": ["postgres", "supabase"]},
+  "productCollections": ["infra_operations", "customer_state", "admin_state", "coordination_metadata"],
+  "planes": {
+    "customer": {"localDatabase": "fiducia-customer", "supabaseProject": "customer-configured"},
+    "admin": {"localDatabase": "fiducia-admin", "supabaseProject": "admin-configured"},
+    "isolation": "customer and admin planes must never share local databases, Supabase URLs, clients, cursors, or credentials"
+  },
+  "wrapperRetains": [
+    "Fiducia customer/admin generated envelopes and schema validation",
+    "strict customer/admin plane isolation and independently configurable Supabase instances",
+    "tenant authorization, shared-auth token exchange, RLS, and RPC mapping",
+    "operation-level local-queue, optimistic, and remote-confirmed policies",
+    "Fiducia telemetry, outcome observability, migrations, and public facade"
+  ],
+  "delegatesToOptoSync": [
+    "deterministic reconciliation and canonical serialization",
+    "hybrid logical clock and mutation identity",
+    "durable queue lifecycle and local-view rebase",
+    "IndexedDB and SQLite storage primitives",
+    "checkpointed push/pull protocol loop",
+    "background and realtime wake adapters"
+  ],
+  "invariants": {"renderLocalView": true, "realtimeIsWakeHint": true, "serverCursorIsAuthoritative": true, "mutableGitRefsForbidden": true, "removeBespokeCoreOnlyAfterParity": true}
+}

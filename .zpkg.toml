@@ -1,0 +1,17 @@
+[package]
+org = "fiducia-cloud"
+name = "fiducia-sync"
+version = "0.1.0"
+description = "Fiducia dual-plane sync facade backed by the certified opto-sync client SDK"
+license = "MIT"
+keywords = ["sync", "local-first", "indexeddb", "sqlite", "postgres", "supabase", "multitenant"]
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/fiducia-cloud/fiducia-sync"
+
+[dependencies]
+"opto-sync/opto-sync-clients" = "^0.2.0"
+
+[install]
+dir = "zed_modules"
