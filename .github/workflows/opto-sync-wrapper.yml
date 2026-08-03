@@ -22,8 +22,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 env:
-  ZED_CLI_SHA: c636fb8f6b08695c6b4fe94e2481f4d57270b2d7
-  ZED_INTERFACES_SHA: dc0e0a0620b9462817950b552d3d334a184b1cb1
+  ZED_CLI_SHA: a850dbcc799aeaccf1093741ab58439a049c14c9
+  ZED_INTERFACES_SHA: c2e049006453c26ca8ca291783f681fce75cb01f
 
 jobs:
   contract:
