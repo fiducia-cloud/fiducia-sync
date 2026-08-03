@@ -2,7 +2,12 @@ name: opto-sync wrapper contract
 
 on:
   pull_request:
-    paths: ['.zpkg.toml', '.zpkg.lock', 'opto-sync-adapter.json', '.github/workflows/opto-sync-wrapper.yml']
+    paths:
+      - .zpkg.toml
+      - .zpkg.lock
+      - opto-sync-adapter.json
+      - tests/e2e/test_opto_sync_wrapper.py
+      - .github/workflows/opto-sync-wrapper.yml
   workflow_dispatch:
     inputs:
       live_install:
@@ -26,43 +31,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with: {persist-credentials: false}
-      - name: Validate staged dependency, adapter boundary, and dual-plane isolation
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, pathlib, tomllib
-          manifest = tomllib.loads(pathlib.Path('.zpkg.toml').read_text())
-          lock = tomllib.loads(pathlib.Path('.zpkg.lock').read_text())
-          profile = json.loads(pathlib.Path('opto-sync-adapter.json').read_text())
-          assert manifest['dependencies']['opto-sync/opto-sync-clients'] == '^0.2.0'
-          assert manifest['install']['dir'] == 'zed_modules'
-          assert profile['repository'] == os.environ['GITHUB_REPOSITORY']
-          assert profile['dependency'] == {'package': 'opto-sync/opto-sync-clients', 'range': '^0.2.0', 'installRoot': 'zed_modules/opto-sync/opto-sync-clients'}
-          assert profile['e2eRepository'].endswith('-e2e')
-          assert profile['wrapperRetains'] and profile['delegatesToOptoSync']
-          assert all(profile['invariants'][key] is True for key in ('renderLocalView', 'realtimeIsWakeHint', 'serverCursorIsAuthoritative', 'mutableGitRefsForbidden', 'removeBespokeCoreOnlyAfterParity'))
-          known = {'rust': ('opto-sync-client', 'clients/rust'), 'typescript': ('@opto-sync/client', 'clients/ts'), 'dart': ('opto_sync_client', 'clients/dart'), 'gleam': ('opto_sync_client', 'clients/gleam')}
-          for language, adapter in profile['nativeAdapters'].items():
-              package, suffix = known[language]
-              assert adapter['package'] == package and adapter['path'].endswith(suffix)
-              assert '..' not in pathlib.PurePosixPath(adapter['path']).parts
-          planes = profile.get('planes')
-          if planes:
-              assert planes['customer']['localDatabase'] != planes['admin']['localDatabase']
-              assert planes['customer']['supabaseProject'] != planes['admin']['supabaseProject']
-          packages = lock.get('package', [])
-          if profile['releaseState'] == 'blocked-until-certified-package-published':
-              assert lock.get('version') == 1 and packages == []
-          else:
-              package = next(p for p in packages if p.get('org') == 'opto-sync' and p.get('name') == 'opto-sync-clients')
-              for field in ('version', 'sha256', 'size', 'format', 'vcs_tag', 'vcs_commit', 'source'):
-                  assert package.get(field), f'missing lock field: {field}'
-              assert len(package['sha256']) == 64
-          serialized = json.dumps(profile).lower()
-          assert all(value not in serialized for value in ('refs/heads/main', 'branch = "main"', 'latest'))
-          PY
+        with:
+          persist-credentials: false
+      - name: Run dependency, adapter-boundary, and dual-plane E2E contracts
+        run: python3 -m unittest discover -s tests/e2e -p 'test_opto_sync_wrapper.py' -v
 
   live-install:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_install }}
@@ -70,7 +42,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with: {persist-credentials: false}
+        with:
+          persist-credentials: false
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: zed-pkg/zed-cli
