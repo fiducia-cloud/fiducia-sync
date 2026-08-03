@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       live_install:
-        description: Resolve and inspect the certified Zed artifact
+        description: Install and inspect the certified artifact from the committed lock
         required: true
         default: false
         type: boolean
@@ -18,6 +18,7 @@ concurrency:
   cancel-in-progress: true
 env:
   ZED_CLI_SHA: c636fb8f6b08695c6b4fe94e2481f4d57270b2d7
+  ZED_INTERFACES_SHA: dc0e0a0620b9462817950b552d3d334a184b1cb1
 
 jobs:
   contract:
@@ -26,16 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: {persist-credentials: false}
-      - name: Validate staged dependency and adapter boundary
+      - name: Validate staged dependency, adapter boundary, and dual-plane isolation
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           import json, os, pathlib, tomllib
-          root = pathlib.Path('.')
-          manifest = tomllib.loads((root / '.zpkg.toml').read_text())
-          lock = (root / '.zpkg.lock').read_text().strip()
-          profile = json.loads((root / 'opto-sync-adapter.json').read_text())
+          manifest = tomllib.loads(pathlib.Path('.zpkg.toml').read_text())
+          lock = tomllib.loads(pathlib.Path('.zpkg.lock').read_text())
+          profile = json.loads(pathlib.Path('opto-sync-adapter.json').read_text())
           assert manifest['dependencies']['opto-sync/opto-sync-clients'] == '^0.2.0'
           assert manifest['install']['dir'] == 'zed_modules'
           assert profile['repository'] == os.environ['GITHUB_REPOSITORY']
@@ -48,16 +48,20 @@ jobs:
               package, suffix = known[language]
               assert adapter['package'] == package and adapter['path'].endswith(suffix)
               assert '..' not in pathlib.PurePosixPath(adapter['path']).parts
-          if profile['releaseState'] == 'blocked-until-certified-package-published':
-              assert lock == 'version = 1'
-          else:
-              assert 'opto-sync/opto-sync-clients' in lock and 'sha256' in lock
-          serialized = json.dumps(profile).lower()
-          assert all(value not in serialized for value in ('refs/heads/main', 'branch = "main"', 'latest'))
           planes = profile.get('planes')
           if planes:
               assert planes['customer']['localDatabase'] != planes['admin']['localDatabase']
               assert planes['customer']['supabaseProject'] != planes['admin']['supabaseProject']
+          packages = lock.get('package', [])
+          if profile['releaseState'] == 'blocked-until-certified-package-published':
+              assert lock.get('version') == 1 and packages == []
+          else:
+              package = next(p for p in packages if p.get('org') == 'opto-sync' and p.get('name') == 'opto-sync-clients')
+              for field in ('version', 'sha256', 'size', 'format', 'vcs_tag', 'vcs_commit', 'source'):
+                  assert package.get(field), f'missing lock field: {field}'
+              assert len(package['sha256']) == 64
+          serialized = json.dumps(profile).lower()
+          assert all(value not in serialized for value in ('refs/heads/main', 'branch = "main"', 'latest'))
           PY
 
   live-install:
@@ -71,21 +75,30 @@ jobs:
         with:
           repository: zed-pkg/zed-cli
           ref: ${{ env.ZED_CLI_SHA }}
-          path: .zed-cli
+          path: .tools/zed-cli
           persist-credentials: false
-      - run: cargo build --locked --release --manifest-path .zed-cli/Cargo.toml --bin zed
-      - name: Resolve certified package and inspect native targets
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_SHA }}
+          path: .tools/zed-interfaces
+          persist-credentials: false
+      - name: Build pinned Zed CLI with its sibling interface crate
+        run: cargo build --locked --release --manifest-path .tools/zed-cli/Cargo.toml --bin zed
+      - name: Frozen-install and verify native targets and provenance
         shell: bash
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/.zed-cli/target/release/zed" install
+          "$GITHUB_WORKSPACE/.tools/zed-cli/target/release/zed" install --frozen --install-mode copy
           python3 - <<'PY'
-          import json, pathlib
+          import json, pathlib, re, tomllib
           profile = json.loads(pathlib.Path('opto-sync-adapter.json').read_text())
           expected = {'rust': 'Cargo.toml', 'typescript': 'package.json', 'dart': 'pubspec.yaml', 'gleam': 'gleam.toml'}
           for language, adapter in profile['nativeAdapters'].items():
               target = pathlib.Path(adapter['path']) / expected[language]
               assert target.is_file(), f'missing installed adapter: {target}'
-          lock = pathlib.Path('.zpkg.lock').read_text()
-          assert 'opto-sync/opto-sync-clients' in lock and 'sha256' in lock
+          package = next(p for p in tomllib.loads(pathlib.Path('.zpkg.lock').read_text()).get('package', []) if p.get('org') == 'opto-sync' and p.get('name') == 'opto-sync-clients')
+          assert re.fullmatch(r'[0-9a-f]{64}', package['sha256'])
+          assert package['size'] > 0 and package['format'] and package['vcs_tag'] and package['source']
+          assert re.fullmatch(r'[0-9a-f]{40}', package['vcs_commit'])
           PY
