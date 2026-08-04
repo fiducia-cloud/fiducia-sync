@@ -1,0 +1,162 @@
+name: zed-package
+on:
+  pull_request:
+    paths:
+      - ".zpkg.toml"
+      - ".zpkg.lock"
+      - "Cargo.toml"
+      - "crates/postgres/Cargo.toml"
+      - "sdk/package.json"
+      - "sdk/tests/client.test.mjs"
+      - "dart/pubspec.yaml"
+      - "sql/**"
+      - "schema/**"
+      - "tools/zpkg-contract.test.mjs"
+      - "docs/zed-package.md"
+      - ".github/workflows/zed-package.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".zpkg.toml"
+      - ".zpkg.lock"
+      - "Cargo.toml"
+      - "crates/postgres/Cargo.toml"
+      - "sdk/package.json"
+      - "sdk/tests/client.test.mjs"
+      - "dart/pubspec.yaml"
+      - "sql/**"
+      - "schema/**"
+      - "tools/zpkg-contract.test.mjs"
+      - "docs/zed-package.md"
+      - ".github/workflows/zed-package.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZED_CLI_COMMIT: 9b8e5f3d3b98845436899b9a8645f3ce19689f85
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate workflow syntax
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: ./.github/workflows/zed-package.yml
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.22.1"
+
+      - name: Run static package, version, lock, and telemetry contracts
+        run: node --test tools/zpkg-contract.test.mjs
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.95.0"
+
+      - name: Install the canonical Zed CLI revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_root="$RUNNER_TEMP/zed-cli"
+          cargo install \
+            --git https://github.com/zed-pkg/zed-cli \
+            --rev "$ZED_CLI_COMMIT" \
+            --locked \
+            --root "$install_root" \
+            --bin zed
+          printf '%s/bin\n' "$install_root" >> "$GITHUB_PATH"
+          "$install_root/bin/zed" --version
+
+      - name: Produce the canonical release plan twice
+        shell: bash
+        run: |
+          set -euo pipefail
+          zed release plan --json > "$RUNNER_TEMP/zed-plan-1.json"
+          zed release plan --json > "$RUNNER_TEMP/zed-plan-2.json"
+          cmp "$RUNNER_TEMP/zed-plan-1.json" "$RUNNER_TEMP/zed-plan-2.json"
+
+      - name: Verify the exact Zed, native, and forge release routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const plan = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/zed-plan-1.json`, "utf8"));
+          const fail = (message) => { throw new Error(message); };
+          if (plan.release_set !== "fiducia/fiducia-sync@0.2.0#v0.2.0") fail(`unexpected release_set ${plan.release_set}`);
+          if (plan.source.package !== "fiducia/fiducia-sync") fail("unexpected source package");
+          if (plan.source.version !== "0.2.0") fail("unexpected source version");
+          if (plan.source.repository !== "https://github.com/fiducia-cloud/fiducia-sync") fail("unexpected source repository");
+
+          const expectedZed = new Map([
+            ["dart", ["fiducia/fiducia-sync-flutter", "dart"]],
+            ["nodejs", ["fiducia/fiducia-sync-sdk", "sdk"]],
+            ["rust", ["fiducia/fiducia-sync-core", "."]],
+            ["rust-postgres", ["fiducia/fiducia-sync-postgres", "crates/postgres"]],
+            ["schema", ["fiducia/fiducia-sync-schema", "schema"]],
+            ["sql", ["fiducia/fiducia-sync-sql", "sql"]],
+          ]);
+          if (plan.zed.length !== expectedZed.size) fail(`expected ${expectedZed.size} Zed artifacts, found ${plan.zed.length}`);
+          for (const artifact of plan.zed) {
+            const expected = expectedZed.get(artifact.target);
+            if (!expected) fail(`unexpected Zed target ${artifact.target}`);
+            if (artifact.package !== expected[0] || artifact.dir !== expected[1] || artifact.version !== "0.2.0") {
+              fail(`unexpected Zed artifact for ${artifact.target}: ${JSON.stringify(artifact)}`);
+            }
+          }
+
+          const native = new Map(plan.native.map((artifact) => [artifact.target, artifact]));
+          if (native.size !== 3) fail(`expected 3 native routes, found ${native.size}`);
+          const expectedNative = new Map([
+            ["dart", ["pub.dev", "fiducia_sync", "dart"]],
+            ["nodejs", ["npm", "@fiducia-cloud/fiducia-sync-sdk", "sdk"]],
+            ["rust", ["crates-io", "fiducia-sync-core", "."]],
+          ]);
+          for (const [target, expected] of expectedNative) {
+            const artifact = native.get(target);
+            if (!artifact) fail(`missing native route ${target}`);
+            if (artifact.registry !== expected[0] || artifact.package !== expected[1] || artifact.dir !== expected[2] || artifact.version !== "0.2.0") {
+              fail(`unexpected native route ${target}: ${JSON.stringify(artifact)}`);
+            }
+          }
+          if (native.has("rust-postgres")) fail("rust-postgres native publication must remain deferred while Cargo version is 0.1.0");
+
+          if (plan.forge.length !== 1) fail(`expected one forge mirror, found ${plan.forge.length}`);
+          const forge = plan.forge[0];
+          if (forge.target !== "nodejs" || forge.registry !== "github-packages" || forge.format !== "npm" || forge.package !== "@fiducia-cloud/fiducia-sync-sdk" || forge.version !== "0.2.0") {
+            fail(`unexpected forge route: ${JSON.stringify(forge)}`);
+          }
+          NODE
+
+      - name: Prove the Zed lock is empty only because the manifest has no Zed dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r' < .zpkg.lock | sed '/^[[:space:]]*$/d')" = 'version = 1'
+          ! grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml
+          ! grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock
+
+      - name: Reject registry credentials and private keys in package contract files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tskey-(auth|client)-[A-Za-z0-9_-]{16,}|NPM_TOKEN[[:space:]]*=|CARGO_REGISTRY_TOKEN[[:space:]]*=|PUB_TOKEN[[:space:]]*=' \
+            .zpkg.toml .zpkg.lock tools/zpkg-contract.test.mjs docs/zed-package.md; then
+            echo "credential/private-key pattern detected" >&2
+            exit 1
+          fi
