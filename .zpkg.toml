@@ -15,7 +15,7 @@ dir = "."
 name = "fiducia-sync-core"
 
 [targets.rust.native]
-registry = "cargo"
+registry = "crates-io"
 package = "fiducia-sync-core"
 
 [targets.rust-postgres]
@@ -41,7 +41,7 @@ dir = "dart"
 name = "fiducia-sync-flutter"
 
 [targets.dart.native]
-registry = "pub"
+registry = "pub.dev"
 package = "fiducia_sync"
 
 [targets.sql]
