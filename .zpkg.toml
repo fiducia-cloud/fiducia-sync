@@ -1,0 +1,72 @@
+[package]
+org = "fiducia"
+name = "fiducia-sync"
+version = "0.2.0"
+description = "Local-first sync core, Postgres adapter, TypeScript SDK, Flutter client, SQL, and protocol schema"
+license = "MIT"
+keywords = ["offline-first", "postgres", "supabase", "sync"]
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/fiducia-cloud/fiducia-sync"
+
+[targets.rust]
+dir = "."
+name = "fiducia-sync-core"
+
+[targets.rust.native]
+registry = "cargo"
+package = "fiducia-sync-core"
+
+[targets.rust-postgres]
+dir = "crates/postgres"
+name = "fiducia-sync-postgres"
+ecosystem = "cargo"
+
+# The Postgres crate remains at native version 0.1.0. It is included in the
+# coordinated Zed artifact, but its crates.io mirror is intentionally deferred
+# until its Cargo manifest is promoted to the root Zed version.
+
+[targets.nodejs]
+dir = "sdk"
+name = "fiducia-sync-sdk"
+
+[targets.nodejs.native]
+registry = "npm"
+package = "@fiducia-cloud/fiducia-sync-sdk"
+forge = ["github-packages"]
+
+[targets.dart]
+dir = "dart"
+name = "fiducia-sync-flutter"
+
+[targets.dart.native]
+registry = "pub"
+package = "fiducia_sync"
+
+[targets.sql]
+dir = "sql"
+name = "fiducia-sync-sql"
+
+[targets.schema]
+dir = "schema"
+name = "fiducia-sync-schema"
+
+[publish]
+exclude = [
+  ".dart_tool/**",
+  ".github/**",
+  ".idea/**",
+  ".vscode/**",
+  "**/.DS_Store",
+  "**/coverage/**",
+  "**/node_modules/**",
+  "**/target/**",
+  "dist/**",
+  "docs/**",
+  "target/**",
+  "tests/**",
+]
+
+[scripts]
+test = "cargo test --locked --workspace --all-targets && npm test --prefix sdk"
