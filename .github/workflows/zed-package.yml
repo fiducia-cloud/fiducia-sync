@@ -147,8 +147,14 @@ jobs:
         run: |
           set -euo pipefail
           test "$(tr -d '\r' < .zpkg.lock | sed '/^[[:space:]]*$/d')" = 'version = 1'
-          ! grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml
-          ! grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock
+          if grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml; then
+            echo "Zed dependency table exists beside an empty lock" >&2
+            exit 1
+          fi
+          if grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock; then
+            echo "empty-lock contract contains dependency resolution data" >&2
+            exit 1
+          fi
 
       - name: Reject registry credentials and private keys in package contract files
         shell: bash
