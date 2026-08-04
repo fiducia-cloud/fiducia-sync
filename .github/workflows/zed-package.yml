@@ -123,7 +123,7 @@ jobs:
           if (native.size !== 3) fail(`expected 3 native routes, found ${native.size}`);
           const expectedNative = new Map([
             ["dart", ["pub.dev", "fiducia_sync", "dart"]],
-            ["nodejs", ["npm", "@fiducia-cloud/fiducia-sync-sdk", "sdk"]],
+            ["nodejs", ["npm", "@fiducia/sync", "sdk"]],
             ["rust", ["crates-io", "fiducia-sync-core", "."]],
           ]);
           for (const [target, expected] of expectedNative) {
@@ -137,7 +137,7 @@ jobs:
 
           if (plan.forge.length !== 1) fail(`expected one forge mirror, found ${plan.forge.length}`);
           const forge = plan.forge[0];
-          if (forge.target !== "nodejs" || forge.registry !== "github-packages" || forge.format !== "npm" || forge.package !== "@fiducia-cloud/fiducia-sync-sdk" || forge.version !== "0.2.0") {
+          if (forge.target !== "nodejs" || forge.registry !== "github-packages" || forge.format !== "npm" || forge.package !== "@fiducia/sync" || forge.version !== "0.2.0") {
             fail(`unexpected forge route: ${JSON.stringify(forge)}`);
           }
           NODE
