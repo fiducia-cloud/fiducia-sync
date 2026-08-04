@@ -153,10 +153,30 @@ jobs:
       - name: Produce the canonical release plan twice
         shell: bash
         run: |
-          set -euo pipefail
-          zed release plan --json > "$RUNNER_TEMP/zed-plan-1.json"
-          zed release plan --json > "$RUNNER_TEMP/zed-plan-2.json"
+          set -uo pipefail
+          status=0
+          zed release plan --json \
+            > "$RUNNER_TEMP/zed-plan-1.json" \
+            2> "$RUNNER_TEMP/zed-plan-1.stderr" || status=$?
+          if (( status != 0 )); then
+            cat "$RUNNER_TEMP/zed-plan-1.stderr" >&2
+            exit "$status"
+          fi
+          zed release plan --json \
+            > "$RUNNER_TEMP/zed-plan-2.json" \
+            2> "$RUNNER_TEMP/zed-plan-2.stderr"
           cmp "$RUNNER_TEMP/zed-plan-1.json" "$RUNNER_TEMP/zed-plan-2.json"
+          cmp "$RUNNER_TEMP/zed-plan-1.stderr" "$RUNNER_TEMP/zed-plan-2.stderr"
+      - name: Upload canonical parser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: zed-release-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/zed-plan-*.json
+            ${{ runner.temp }}/zed-plan-*.stderr
+          if-no-files-found: error
+          retention-days: 1
       - name: Verify exact Zed, native, and forge routes
         shell: bash
         run: |
