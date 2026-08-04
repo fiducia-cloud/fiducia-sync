@@ -43,26 +43,56 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  workflow-static:
-    name: workflow and static contracts
+  workflow-syntax:
+    name: workflow syntax
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - name: Validate workflow syntax
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: ./.github/workflows/zed-package.yml
 
+  static-contract:
+    name: static / ${{ matrix.id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: source-identity
+            pattern: "Zed source identity and coordinated version are exact"
+          - id: target-contents
+            pattern: "every Zed target exists and has one stable package identity"
+          - id: native-routes
+            pattern: "native release routes match native names and release-set version"
+          - id: postgres-boundary
+            pattern: "Postgres Zed target is honest about deferred native publication"
+          - id: empty-lock
+            pattern: "zero Zed dependencies require an empty version-1 lock"
+          - id: publish-exclusions
+            pattern: "publish exclusions cover generated, dependency, CI, docs, and test trees"
+          - id: bounded-script
+            pattern: "package script is bounded to tests and performs no publication or credential action"
+          - id: sdk-policy
+            pattern: "SDK emit-only regression test enables error telemetry instead of weakening policy"
+          - id: credential-hygiene
+            pattern: "tracked package contract contains no credential or private-key material"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.22.1"
-
-      - name: Run package, version, target, and telemetry contracts
-        run: node --test tools/zpkg-contract.test.mjs
+      - name: Run named static invariant
+        env:
+          TEST_PATTERN: ${{ matrix.pattern }}
+        run: node --test --test-name-pattern "$TEST_PATTERN" tools/zpkg-contract.test.mjs
 
   lock-secret-hygiene:
     name: zero-dependency lock and secret hygiene
@@ -72,7 +102,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - name: Prove the lock is empty only because there are no Zed dependencies
         shell: bash
         run: |
@@ -86,7 +115,6 @@ jobs:
             echo "empty-lock contract contains dependency resolution data" >&2
             exit 1
           fi
-
       - name: Reject registry credentials and private keys
         shell: bash
         run: |
@@ -106,11 +134,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: "1.95.0"
-
       - name: Install the canonical Zed CLI revision
         shell: bash
         run: |
@@ -124,7 +150,6 @@ jobs:
             --bin zed
           printf '%s/bin\n' "$install_root" >> "$GITHUB_PATH"
           "$install_root/bin/zed" --version
-
       - name: Produce the canonical release plan twice
         shell: bash
         run: |
@@ -132,7 +157,6 @@ jobs:
           zed release plan --json > "$RUNNER_TEMP/zed-plan-1.json"
           zed release plan --json > "$RUNNER_TEMP/zed-plan-2.json"
           cmp "$RUNNER_TEMP/zed-plan-1.json" "$RUNNER_TEMP/zed-plan-2.json"
-
       - name: Verify exact Zed, native, and forge routes
         shell: bash
         run: |
