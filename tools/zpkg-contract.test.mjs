@@ -17,10 +17,18 @@ const sdkPackage = JSON.parse(read("sdk/package.json"));
 const dartPubspec = read("dart/pubspec.yaml");
 
 function section(text, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = text.match(new RegExp(`^\\[${escaped}\\]\\s*$([\\s\\S]*?)(?=^\\[|\\Z)`, "m"));
-  assert(match, `missing [${name}] section`);
-  return match[1];
+  const lines = text.split(/\r?\n/u);
+  const header = `[${name}]`;
+  const start = lines.findIndex((line) => line.trim() === header);
+  assert.notEqual(start, -1, `missing [${name}] section`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\[[^\]]+\]$/u.test(lines[index].trim())) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start + 1, end).join("\n");
 }
 
 function quoted(text, key, label = key) {
