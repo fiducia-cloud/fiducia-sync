@@ -40,11 +40,11 @@ The two plans must be byte-identical.
 
 ## Native release routes
 
-The release plan validates these native manifests against the root version:
+The release plan validates these isolated native manifests against the root
+release-set version:
 
 | Zed target | Registry | Native package | Required version |
 |---|---|---|---|
-| `rust` | crates.io | `fiducia-sync-core` | `0.2.0` |
 | `nodejs` | npm | `@fiducia/sync` | `0.2.0` |
 | `dart` | pub.dev | `fiducia_sync` | `0.2.0` |
 
@@ -54,6 +54,33 @@ names serving separate registries and must not be conflated.
 
 The npm route also declares a GitHub Packages mirror of `@fiducia/sync`. This is
 plan metadata only; CI does not publish or authenticate to any registry.
+
+### Root Rust native publication is deferred
+
+The Rust core remains a valid Zed target at repository root:
+
+```text
+fiducia/fiducia-sync-core@0.2.0  ->  .
+```
+
+It deliberately has no `[targets.rust.native]` route. In a polyglot manifest,
+a target whose directory is `.` represents the whole source repository rather
+than an isolated native package root. The canonical Zed manifest contract
+rejects assigning that target to crates.io; root `[publish.native]` is reserved
+for single-language packages with no target fan-out.
+
+Before enabling a crates.io route for `fiducia-sync-core`:
+
+1. isolate the core crate beneath its own package directory, or approve a
+   separate release architecture that preserves honest artifact boundaries;
+2. update workspace paths, include rules, SDK/WASM build paths, and tests;
+3. validate the full Rust, Postgres, SDK/WASM, and Zed release-plan suites;
+4. add the native route only after the isolated Cargo manifest is authoritative;
+5. publish only through the approved coordinated release workflow.
+
+This PR does not move the crate merely to satisfy metadata. Preserving the
+working repository layout is safer than claiming that the whole repository is a
+single crates.io package.
 
 ### Postgres native publication is deferred
 
@@ -101,6 +128,21 @@ a nonempty dependency table both fail CI.
 Native Cargo, npm, and Dart dependency locks remain owned by their native
 toolchains and are separate from `.zpkg.lock`.
 
+## Cargo audit reachability boundary
+
+The workspace lock currently records optional `rust_decimal -> rkyv 0.7.46`
+metadata from SeaORM. RustSec flags that `rkyv` release, but Fiducia Sync does
+not enable SeaORM's decimal feature. CI therefore generates Cargo metadata for
+all workspace features and fails if the vulnerable package appears in the
+active resolved graph. Only after that machine-checked non-reachability proof
+does the audit command apply the narrowly scoped advisory exception.
+
+If any workspace change activates the affected package, the reachability check
+fails before `cargo audit`; the exception cannot silently convert reachable
+vulnerable code into a green build. The preferred long-term removal is an
+upstream SeaORM/rust_decimal dependency line whose lock metadata no longer
+contains the affected `rkyv` release.
+
 ## SDK regression fixed with the package work
 
 The existing SDK test for `failure_mode = "emit_only"` supplied
@@ -131,9 +173,10 @@ cargo install \
 /tmp/fiducia-zed-cli/bin/zed release plan --json
 ```
 
-The checked plan must contain six Zed artifacts, three native routes, and the
+The checked plan must contain six Zed artifacts, two native routes, and the
 single `@fiducia/sync` GitHub Packages mirror. It must not contain a native route
-for `rust-postgres` until its native version is aligned.
+for either Rust target until each one has an isolated, version-aligned native
+package root.
 
 ## Publication boundary
 
