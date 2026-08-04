@@ -1,0 +1,68 @@
+[package]
+org = "fiducia"
+name = "fiducia-sync"
+version = "0.2.0"
+description = "Local-first sync core, Postgres adapter, TypeScript SDK, Flutter client, SQL, and protocol schema"
+license = "MIT"
+keywords = ["offline-first", "postgres", "supabase", "sync"]
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/fiducia-cloud/fiducia-sync"
+
+[targets.rust]
+dir = "."
+name = "fiducia-sync-core"
+# The root crate remains a Zed artifact, but a polyglot target rooted at `.`
+# cannot declare a native route: it owns the whole repository rather than an
+# isolated native package root. A crates.io mirror requires moving the core
+# crate beneath an isolated directory or a separate reviewed release design.
+
+[targets.rust-postgres]
+dir = "crates/postgres"
+name = "fiducia-sync-postgres"
+ecosystem = "cargo"
+# Postgres crate remains at native version 0.1.0; its crates.io mirror is intentionally deferred.
+
+[targets.nodejs]
+dir = "sdk"
+name = "fiducia-sync-sdk"
+
+[targets.nodejs.native]
+registry = "npm"
+package = "@fiducia/sync"
+forge = ["github-packages"]
+
+[targets.dart]
+dir = "dart"
+name = "fiducia-sync-flutter"
+
+[targets.dart.native]
+registry = "pub.dev"
+package = "fiducia_sync"
+
+[targets.sql]
+dir = "sql"
+name = "fiducia-sync-sql"
+
+[targets.schema]
+dir = "schema"
+name = "fiducia-sync-schema"
+
+[publish]
+exclude = [
+  ".github/**",
+  ".gitignore",
+  ".zpkg.lock",
+  "**/node_modules/**",
+  "**/target/**",
+  "dart/.dart_tool/**",
+  "dart/build/**",
+  "docs/**",
+  "pkg-node/**",
+  "tests/**",
+  "tools/**",
+]
+
+[scripts]
+test = "cargo test --locked --workspace --all-targets && npm test --prefix sdk"
