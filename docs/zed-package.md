@@ -130,18 +130,28 @@ toolchains and are separate from `.zpkg.lock`.
 
 ## Cargo audit reachability boundary
 
-The workspace lock currently records optional `rust_decimal -> rkyv 0.7.46`
-metadata from SeaORM. RustSec flags that `rkyv` release, but Fiducia Sync does
-not enable SeaORM's decimal feature. CI therefore generates Cargo metadata for
-all workspace features and fails if the vulnerable package appears in the
-active resolved graph. Only after that machine-checked non-reachability proof
-does the audit command apply the narrowly scoped advisory exception.
+The workspace lock records optional `rust_decimal -> rkyv 0.7.46` metadata from
+SeaORM. RustSec flags every supported `rkyv` 0.7 release for insufficient shared
+pointer archive validation. Fiducia Sync does not enable SeaORM's decimal
+feature and does not process rkyv archives.
 
-If any workspace change activates the affected package, the reachability check
-fails before `cargo audit`; the exception cannot silently convert reachable
-vulnerable code into a green build. The preferred long-term removal is an
-upstream SeaORM/rust_decimal dependency line whose lock metadata no longer
-contains the affected `rkyv` release.
+A raw `cargo metadata` resolve list is not an execution-reachability proof: it
+can include optional lockfile packages that Cargo will not build. CI instead
+asks Cargo for its feature-unified dependency tree across the whole workspace,
+all workspace features, every target platform, and normal/build/dev edges. It
+fails if that actual tree contains `rkyv v0.7.46`. The same job already compiles,
+lints, and tests every workspace target and feature before the check.
+
+Only after the tree proves non-reachability does `cargo audit` apply the single,
+named `RUSTSEC-2026-0235` exception. If a later workspace feature or dependency
+activates the affected package, the tree check fails and prints the inverse
+feature path before audit; the exception cannot silently convert compiled
+vulnerable code into a green build.
+
+The preferred long-term cleanup remains an upstream SeaORM/rust_decimal lock
+line that no longer records the unsupported rkyv 0.7 series. The exception must
+be removed as soon as the lock can be updated without changing Fiducia's runtime
+contract.
 
 ## SDK regression fixed with the package work
 
