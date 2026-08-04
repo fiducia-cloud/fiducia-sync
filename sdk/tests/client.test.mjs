@@ -155,7 +155,7 @@ test("throw_error and emit_only preserve durable retries with distinct caller be
     "emit",
     { name: "b" },
     offline,
-    { policy: policy({ failure_mode: "emit_only" }) },
+    { policy: policy({ failure_mode: "emit_only", telemetry: "errors" }) },
   );
   assert.deepEqual(emitted, { status: "queued", attempts: 1 });
   assert.equal((await queue.list()).length, 2);
