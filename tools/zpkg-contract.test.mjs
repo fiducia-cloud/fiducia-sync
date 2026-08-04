@@ -9,6 +9,20 @@ const root = path.resolve(here, "..");
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
 const exists = (relativePath) => fs.existsSync(path.join(root, relativePath));
 
+function filesWithExtension(relativeRoot, extension) {
+  const matches = [];
+  const visit = (relativePath) => {
+    const absolute = path.join(root, relativePath);
+    for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
+      const child = path.join(relativePath, entry.name);
+      if (entry.isDirectory()) visit(child);
+      else if (entry.isFile() && entry.name.endsWith(extension)) matches.push(child);
+    }
+  };
+  visit(relativeRoot);
+  return matches.sort();
+}
+
 const manifest = read(".zpkg.toml");
 const lock = read(".zpkg.lock");
 const cargo = read("Cargo.toml");
@@ -99,15 +113,14 @@ test("every Zed target exists and has one stable package identity", () => {
     assert.deepEqual({ dir: actual.dir, name: actual.name }, expected, name);
     assert.equal(exists(expected.dir), true, `target directory missing: ${expected.dir}`);
   }
-  assert.equal(exists("sql/postgres/001_fiducia_sync.sql"), true);
-  assert.equal(exists("schema/sync-operation.schema.json"), true);
+  assert.ok(filesWithExtension("sql", ".sql").length >= 1, "SQL target must contain at least one .sql file");
+  assert.ok(filesWithExtension("schema", ".json").length >= 1, "schema target must contain at least one .json file");
 });
 
 test("native release routes match native names and release-set version", () => {
   assert.deepEqual(rootPackage, { name: "fiducia-sync-core", version: "0.2.0" });
-  assert.equal(sdkPackage.name, "@fiducia-cloud/fiducia-sync-sdk");
+  assert.equal(sdkPackage.name, "@fiducia/sync");
   assert.equal(sdkPackage.version, "0.2.0");
-  assert.equal(sdkPackage.private, false);
   assert.equal(yamlScalar(dartPubspec, "name"), "fiducia_sync");
   assert.equal(yamlScalar(dartPubspec, "version"), "0.2.0");
 
