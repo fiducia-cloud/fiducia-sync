@@ -54,7 +54,33 @@ jobs:
       - uses: taiki-e/install-action@065d6a08a14e61e89fb0a4c10eecdbdef39c7d8e # v2
         with:
           tool: cargo-audit@0.22.2
-      - run: cargo audit
+      - name: Prove advisory package is absent from the active feature graph
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --all-features --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          METADATA="${RUNNER_TEMP}/cargo-metadata.json" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path(os.environ["METADATA"]).read_text())
+          packages = {package["id"]: package for package in metadata["packages"]}
+          active = {node["id"] for node in metadata["resolve"]["nodes"]}
+          affected = [
+              packages[package_id]
+              for package_id in active
+              if packages[package_id]["name"] == "rkyv"
+              and packages[package_id]["version"] == "0.7.46"
+          ]
+          if affected:
+              raise SystemExit(
+                  "RUSTSEC-2026-0235 is reachable in the all-workspace-feature graph; "
+                  "remove the affected dependency before auditing"
+              )
+          print("rkyv 0.7.46 is lock metadata only and is absent from the active graph")
+          PY
+      - name: Audit the lock after the reachability proof
+        run: cargo audit --ignore RUSTSEC-2026-0235
 
   # Build the node-target WASM from the same crate, then run the SDK tests that
   # import ../pkg-node.
