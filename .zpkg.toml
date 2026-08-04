@@ -13,19 +13,16 @@ url = "https://github.com/fiducia-cloud/fiducia-sync"
 [targets.rust]
 dir = "."
 name = "fiducia-sync-core"
-
-[targets.rust.native]
-registry = "crates-io"
-package = "fiducia-sync-core"
+# The root crate remains a Zed artifact, but a polyglot target rooted at `.`
+# cannot declare a native route: it owns the whole repository rather than an
+# isolated native package root. A crates.io mirror requires moving the core
+# crate beneath an isolated directory or a separate reviewed release design.
 
 [targets.rust-postgres]
 dir = "crates/postgres"
 name = "fiducia-sync-postgres"
 ecosystem = "cargo"
-
-# The Postgres crate remains at native version 0.1.0. It is included in the
-# coordinated Zed artifact, but its crates.io mirror is intentionally deferred
-# until its Cargo manifest is promoted to the root Zed version.
+# Postgres crate remains at native version 0.1.0; its crates.io mirror is intentionally deferred.
 
 [targets.nodejs]
 dir = "sdk"
@@ -54,18 +51,17 @@ name = "fiducia-sync-schema"
 
 [publish]
 exclude = [
-  ".dart_tool/**",
   ".github/**",
-  ".idea/**",
-  ".vscode/**",
-  "**/.DS_Store",
-  "**/coverage/**",
+  ".gitignore",
+  ".zpkg.lock",
   "**/node_modules/**",
   "**/target/**",
-  "dist/**",
+  "dart/.dart_tool/**",
+  "dart/build/**",
   "docs/**",
-  "target/**",
+  "pkg-node/**",
   "tests/**",
+  "tools/**",
 ]
 
 [scripts]
