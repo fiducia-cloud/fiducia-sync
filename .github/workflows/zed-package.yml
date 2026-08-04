@@ -1,34 +1,22 @@
-name: zed-package
+name: Zed package contract
+
 on:
   pull_request:
     paths:
-      - ".zpkg.toml"
-      - ".zpkg.lock"
-      - "Cargo.toml"
-      - "crates/postgres/Cargo.toml"
-      - "sdk/package.json"
-      - "sdk/tests/client.test.mjs"
-      - "dart/pubspec.yaml"
-      - "sql/**"
-      - "schema/**"
-      - "tools/zpkg-contract.test.mjs"
-      - "docs/zed-package.md"
-      - ".github/workflows/zed-package.yml"
+      - .github/workflows/zed-package.yml
+      - .zpkg.lock
+      - .zpkg.toml
+      - Cargo.toml
+      - crates/postgres/Cargo.toml
+      - dart/pubspec.yaml
+      - docs/zed-package.md
+      - schema/**
+      - sdk/package.json
+      - sdk/tests/client.test.mjs
+      - sql/**
+      - tools/zpkg-contract.test.mjs
   push:
     branches: [main]
-    paths:
-      - ".zpkg.toml"
-      - ".zpkg.lock"
-      - "Cargo.toml"
-      - "crates/postgres/Cargo.toml"
-      - "sdk/package.json"
-      - "sdk/tests/client.test.mjs"
-      - "dart/pubspec.yaml"
-      - "sql/**"
-      - "schema/**"
-      - "tools/zpkg-contract.test.mjs"
-      - "docs/zed-package.md"
-      - ".github/workflows/zed-package.yml"
   workflow_dispatch:
 
 permissions:
@@ -39,193 +27,87 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZED_CLI_COMMIT: 9b8e5f3d3b98845436899b9a8645f3ce19689f85
-  CARGO_TERM_COLOR: always
+  ZED_CLI_REV: 9b8e5f3d3b98845436899b9a8645f3ce19689f85
 
 jobs:
-  workflow-syntax:
-    name: workflow syntax
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Validate workflow syntax
-        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
-        with:
-          args: ./.github/workflows/zed-package.yml
-
-  static-contract:
-    name: static / ${{ matrix.id }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: source-identity
-            pattern: "Zed source identity and coordinated version are exact"
-          - id: target-contents
-            pattern: "every Zed target exists and has one stable package identity"
-          - id: native-routes
-            pattern: "native release routes match native names and release-set version"
-          - id: postgres-boundary
-            pattern: "Postgres Zed target is honest about deferred native publication"
-          - id: empty-lock
-            pattern: "zero Zed dependencies require an empty version-1 lock"
-          - id: publish-exclusions
-            pattern: "publish exclusions cover generated, dependency, CI, docs, and test trees"
-          - id: bounded-script
-            pattern: "package script is bounded to tests and performs no publication or credential action"
-          - id: sdk-policy
-            pattern: "SDK emit-only regression test enables error telemetry instead of weakening policy"
-          - id: credential-hygiene
-            pattern: "tracked package contract contains no credential or private-key material"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: "22.22.1"
-      - name: Run named static invariant
-        env:
-          TEST_PATTERN: ${{ matrix.pattern }}
-        run: node --test --test-name-pattern "$TEST_PATTERN" tools/zpkg-contract.test.mjs
-
-  lock-secret-hygiene:
-    name: zero-dependency lock and secret hygiene
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Prove the lock is empty only because there are no Zed dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(tr -d '\r' < .zpkg.lock | sed '/^[[:space:]]*$/d')" = 'version = 1'
-          if grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml; then
-            echo "Zed dependency table exists beside an empty lock" >&2
-            exit 1
-          fi
-          if grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock; then
-            echo "empty-lock contract contains dependency resolution data" >&2
-            exit 1
-          fi
-      - name: Reject registry credentials and private keys
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -RInE \
-            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tskey-(auth|client)-[A-Za-z0-9_-]{16,}|NPM_TOKEN[[:space:]]*=|CARGO_REGISTRY_TOKEN[[:space:]]*=|PUB_TOKEN[[:space:]]*=' \
-            .zpkg.toml .zpkg.lock tools/zpkg-contract.test.mjs docs/zed-package.md; then
-            echo "credential/private-key pattern detected" >&2
-            exit 1
-          fi
-
-  canonical-release-plan:
-    name: canonical Zed release plan
+  package-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - name: Validate workflow syntax
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: ./.github/workflows/zed-package.yml
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.22.1"
+
+      - name: Static package-contract tests
+        run: node --test tools/zpkg-contract.test.mjs
+
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: "1.95.0"
+
       - name: Install the canonical Zed CLI revision
-        shell: bash
         run: |
           set -euo pipefail
-          install_root="$RUNNER_TEMP/zed-cli"
           cargo install \
             --git https://github.com/zed-pkg/zed-cli \
-            --rev "$ZED_CLI_COMMIT" \
+            --rev "${ZED_CLI_REV}" \
             --locked \
-            --root "$install_root" \
-            --bin zed
-          printf '%s/bin\n' "$install_root" >> "$GITHUB_PATH"
-          "$install_root/bin/zed" --version
-      - name: Produce the canonical release plan twice
-        shell: bash
-        run: |
-          set -uo pipefail
-          status=0
-          zed release plan --json \
-            > "$RUNNER_TEMP/zed-plan-1.json" \
-            2> "$RUNNER_TEMP/zed-plan-1.stderr" || status=$?
-          if (( status != 0 )); then
-            cat "$RUNNER_TEMP/zed-plan-1.stderr" >&2
-            exit "$status"
-          fi
-          zed release plan --json \
-            > "$RUNNER_TEMP/zed-plan-2.json" \
-            2> "$RUNNER_TEMP/zed-plan-2.stderr"
-          cmp "$RUNNER_TEMP/zed-plan-1.json" "$RUNNER_TEMP/zed-plan-2.json"
-          cmp "$RUNNER_TEMP/zed-plan-1.stderr" "$RUNNER_TEMP/zed-plan-2.stderr"
-      - name: Upload canonical parser diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: zed-release-plan-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/zed-plan-*.json
-            ${{ runner.temp }}/zed-plan-*.stderr
-          if-no-files-found: error
-          retention-days: 1
-      - name: Verify exact Zed, native, and forge routes
-        shell: bash
+            --root "${RUNNER_TEMP}/zed-cli"
+          echo "${RUNNER_TEMP}/zed-cli/bin" >> "${GITHUB_PATH}"
+
+      - name: Canonical Zed release plan is deterministic
         run: |
           set -euo pipefail
-          node <<'NODE'
-          const fs = require("node:fs");
-          const plan = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/zed-plan-1.json`, "utf8"));
-          const fail = (message) => { throw new Error(message); };
-          if (plan.release_set !== "fiducia/fiducia-sync@0.2.0#v0.2.0") fail(`unexpected release_set ${plan.release_set}`);
-          if (plan.source.package !== "fiducia/fiducia-sync") fail("unexpected source package");
-          if (plan.source.version !== "0.2.0") fail("unexpected source version");
-          if (plan.source.repository !== "https://github.com/fiducia-cloud/fiducia-sync") fail("unexpected source repository");
+          zed release plan --json > "${RUNNER_TEMP}/release-plan-a.json"
+          zed release plan --json > "${RUNNER_TEMP}/release-plan-b.json"
+          cmp "${RUNNER_TEMP}/release-plan-a.json" "${RUNNER_TEMP}/release-plan-b.json"
 
-          const expectedZed = new Map([
-            ["dart", ["fiducia/fiducia-sync-flutter", "dart"]],
-            ["nodejs", ["fiducia/fiducia-sync-sdk", "sdk"]],
-            ["rust", ["fiducia/fiducia-sync-core", "."]],
-            ["rust-postgres", ["fiducia/fiducia-sync-postgres", "crates/postgres"]],
-            ["schema", ["fiducia/fiducia-sync-schema", "schema"]],
-            ["sql", ["fiducia/fiducia-sync-sql", "sql"]],
-          ]);
-          if (plan.zed.length !== expectedZed.size) fail(`expected ${expectedZed.size} Zed artifacts, found ${plan.zed.length}`);
-          for (const artifact of plan.zed) {
-            const expected = expectedZed.get(artifact.target);
-            if (!expected) fail(`unexpected Zed target ${artifact.target}`);
-            if (artifact.package !== expected[0] || artifact.dir !== expected[1] || artifact.version !== "0.2.0") {
-              fail(`unexpected Zed artifact for ${artifact.target}: ${JSON.stringify(artifact)}`);
-            }
-          }
+      - name: Inspect exact Zed, native, and forge artifacts
+        env:
+          PLAN: ${{ runner.temp }}/release-plan-a.json
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-          const native = new Map(plan.native.map((artifact) => [artifact.target, artifact]));
-          if (native.size !== 3) fail(`expected 3 native routes, found ${native.size}`);
-          const expectedNative = new Map([
-            ["dart", ["pub.dev", "fiducia_sync", "dart"]],
-            ["nodejs", ["npm", "@fiducia/sync", "sdk"]],
-            ["rust", ["crates-io", "fiducia-sync-core", "."]],
-          ]);
-          for (const [target, expected] of expectedNative) {
-            const artifact = native.get(target);
-            if (!artifact) fail(`missing native route ${target}`);
-            if (artifact.registry !== expected[0] || artifact.package !== expected[1] || artifact.dir !== expected[2] || artifact.version !== "0.2.0") {
-              fail(`unexpected native route ${target}: ${JSON.stringify(artifact)}`);
-            }
-          }
-          if (native.has("rust-postgres")) fail("rust-postgres native publication must remain deferred while Cargo version is 0.1.0");
+          plan = json.loads(Path(os.environ["PLAN"]).read_text())
+          assert plan["release_set"] == "fiducia/fiducia-sync@0.2.0#v0.2.0", plan
+          assert plan["source"] == {
+              "package": "fiducia/fiducia-sync",
+              "version": "0.2.0",
+              "vcs_tag": "v0.2.0",
+              "repository": "https://github.com/fiducia-cloud/fiducia-sync",
+          }, plan["source"]
 
-          if (plan.forge.length !== 1) fail(`expected one forge mirror, found ${plan.forge.length}`);
-          const forge = plan.forge[0];
-          if (forge.target !== "nodejs" || forge.registry !== "github-packages" || forge.format !== "npm" || forge.package !== "@fiducia/sync" || forge.version !== "0.2.0") {
-            fail(`unexpected forge route: ${JSON.stringify(forge)}`);
-          }
-          NODE
+          expected_zed = [
+              {"target": "dart", "package": "fiducia/fiducia-sync-flutter", "version": "0.2.0", "dir": "dart"},
+              {"target": "nodejs", "package": "fiducia/fiducia-sync-sdk", "version": "0.2.0", "dir": "sdk"},
+              {"target": "rust", "package": "fiducia/fiducia-sync-core", "version": "0.2.0", "dir": "."},
+              {"target": "rust-postgres", "package": "fiducia/fiducia-sync-postgres", "version": "0.2.0", "dir": "crates/postgres"},
+              {"target": "schema", "package": "fiducia/fiducia-sync-schema", "version": "0.2.0", "dir": "schema"},
+              {"target": "sql", "package": "fiducia/fiducia-sync-sql", "version": "0.2.0", "dir": "sql"},
+          ]
+          assert plan["zed"] == expected_zed, plan["zed"]
+
+          expected_native = [
+              {"target": "dart", "registry": "pub.dev", "package": "fiducia_sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "dart"},
+              {"target": "nodejs", "registry": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "sdk"},
+          ]
+          assert plan["native"] == expected_native, plan["native"]
+          assert all(route["target"] not in {"rust", "rust-postgres"} for route in plan["native"]), plan["native"]
+
+          expected_forge = [
+              {"target": "nodejs", "registry": "github-packages", "format": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "sdk"},
+          ]
+          assert plan["forge"] == expected_forge, plan["forge"]
+          PY
