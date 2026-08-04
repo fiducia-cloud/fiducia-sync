@@ -33,7 +33,7 @@ name = "fiducia-sync-sdk"
 
 [targets.nodejs.native]
 registry = "npm"
-package = "@fiducia-cloud/fiducia-sync-sdk"
+package = "@fiducia/sync"
 forge = ["github-packages"]
 
 [targets.dart]
