@@ -175,11 +175,10 @@ test("package script is bounded to tests and performs no publication or credenti
 
 test("SDK emit-only regression test enables error telemetry instead of weakening policy", () => {
   const clientTests = read("sdk/tests/client.test.mjs");
-  assert.match(
-    clientTests,
-    /failure_mode:\s*["']emit_only["'][\s\S]{0,120}telemetry:\s*["']errors["']/,
-  );
-  assert.doesNotMatch(clientTests, /failure_mode:\s*["']emit_only["'][^\n}]*\}\s*\)\s*\}/);
+  const strictPolicy = 'policy: policy({ failure_mode: "emit_only", telemetry: "errors" })';
+  const telemetryLessPolicy = 'policy: policy({ failure_mode: "emit_only" })';
+  assert.ok(clientTests.includes(strictPolicy), "emit-only SDK test must enable error telemetry");
+  assert.equal(clientTests.includes(telemetryLessPolicy), false, "emit-only SDK test must not disable its only observable failure path");
 });
 
 test("tracked package contract contains no credential or private-key material", () => {
