@@ -117,16 +117,12 @@ test("every Zed target exists and has one stable package identity", () => {
   assert.ok(filesWithExtension("schema", ".json").length >= 1, "schema target must contain at least one .json file");
 });
 
-test("native release routes match native names and release-set version", () => {
+test("declared native routes match native names and release-set version", () => {
   assert.deepEqual(rootPackage, { name: "fiducia-sync-core", version: "0.2.0" });
   assert.equal(sdkPackage.name, "@fiducia/sync");
   assert.equal(sdkPackage.version, "0.2.0");
   assert.equal(yamlScalar(dartPubspec, "name"), "fiducia_sync");
   assert.equal(yamlScalar(dartPubspec, "version"), "0.2.0");
-
-  const rustNative = section(manifest, "targets.rust.native");
-  assert.equal(quoted(rustNative, "registry"), "crates-io");
-  assert.equal(quoted(rustNative, "package"), rootPackage.name);
 
   const nodeNative = section(manifest, "targets.nodejs.native");
   assert.equal(quoted(nodeNative, "registry"), "npm");
@@ -135,6 +131,15 @@ test("native release routes match native names and release-set version", () => {
   const dartNative = section(manifest, "targets.dart.native");
   assert.equal(quoted(dartNative, "registry"), "pub.dev");
   assert.equal(quoted(dartNative, "package"), "fiducia_sync");
+});
+
+test("root Rust Zed target is honest about deferred native publication", () => {
+  assert.deepEqual(rootPackage, { name: "fiducia-sync-core", version: "0.2.0" });
+  assert.equal(target("rust").dir, ".");
+  assert.doesNotMatch(manifest, /^\[targets\.rust\.native\]\s*$/m);
+  assert.doesNotMatch(manifest, /^\[publish\.native\]\s*$/m);
+  assert.match(manifest, /polyglot target rooted at `\.`/);
+  assert.match(manifest, /crates\.io mirror requires moving the core/);
 });
 
 test("Postgres Zed target is honest about deferred native publication", () => {
