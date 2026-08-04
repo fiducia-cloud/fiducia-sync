@@ -45,11 +45,15 @@ The release plan validates these native manifests against the root version:
 | Zed target | Registry | Native package | Required version |
 |---|---|---|---|
 | `rust` | crates.io | `fiducia-sync-core` | `0.2.0` |
-| `nodejs` | npm | `@fiducia-cloud/fiducia-sync-sdk` | `0.2.0` |
+| `nodejs` | npm | `@fiducia/sync` | `0.2.0` |
 | `dart` | pub.dev | `fiducia_sync` | `0.2.0` |
 
-The npm route also declares a GitHub Packages mirror. This is plan metadata only;
-CI does not publish or authenticate to any registry.
+The Zed artifact is named `fiducia/fiducia-sync-sdk`; its native npm identity is
+`@fiducia/sync`, as declared by `sdk/package.json`. Those are separate package
+names serving separate registries and must not be conflated.
+
+The npm route also declares a GitHub Packages mirror of `@fiducia/sync`. This is
+plan metadata only; CI does not publish or authenticate to any registry.
 
 ### Postgres native publication is deferred
 
@@ -128,8 +132,8 @@ cargo install \
 ```
 
 The checked plan must contain six Zed artifacts, three native routes, and the
-single npm GitHub Packages mirror. It must not contain a native route for
-`rust-postgres` until its native version is aligned.
+single `@fiducia/sync` GitHub Packages mirror. It must not contain a native route
+for `rust-postgres` until its native version is aligned.
 
 ## Publication boundary
 
