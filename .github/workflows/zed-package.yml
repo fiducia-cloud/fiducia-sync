@@ -43,9 +43,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  validate:
+  workflow-static:
+    name: workflow and static contracts
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -60,8 +61,51 @@ jobs:
         with:
           node-version: "22.22.1"
 
-      - name: Run static package, version, lock, and telemetry contracts
+      - name: Run package, version, target, and telemetry contracts
         run: node --test tools/zpkg-contract.test.mjs
+
+  lock-secret-hygiene:
+    name: zero-dependency lock and secret hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prove the lock is empty only because there are no Zed dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r' < .zpkg.lock | sed '/^[[:space:]]*$/d')" = 'version = 1'
+          if grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml; then
+            echo "Zed dependency table exists beside an empty lock" >&2
+            exit 1
+          fi
+          if grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock; then
+            echo "empty-lock contract contains dependency resolution data" >&2
+            exit 1
+          fi
+
+      - name: Reject registry credentials and private keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE \
+            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tskey-(auth|client)-[A-Za-z0-9_-]{16,}|NPM_TOKEN[[:space:]]*=|CARGO_REGISTRY_TOKEN[[:space:]]*=|PUB_TOKEN[[:space:]]*=' \
+            .zpkg.toml .zpkg.lock tools/zpkg-contract.test.mjs docs/zed-package.md; then
+            echo "credential/private-key pattern detected" >&2
+            exit 1
+          fi
+
+  canonical-release-plan:
+    name: canonical Zed release plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -89,7 +133,7 @@ jobs:
           zed release plan --json > "$RUNNER_TEMP/zed-plan-2.json"
           cmp "$RUNNER_TEMP/zed-plan-1.json" "$RUNNER_TEMP/zed-plan-2.json"
 
-      - name: Verify the exact Zed, native, and forge release routes
+      - name: Verify exact Zed, native, and forge routes
         shell: bash
         run: |
           set -euo pipefail
@@ -141,28 +185,3 @@ jobs:
             fail(`unexpected forge route: ${JSON.stringify(forge)}`);
           }
           NODE
-
-      - name: Prove the Zed lock is empty only because the manifest has no Zed dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(tr -d '\r' < .zpkg.lock | sed '/^[[:space:]]*$/d')" = 'version = 1'
-          if grep -Eq '^\[(build-)?dependencies\]$' .zpkg.toml; then
-            echo "Zed dependency table exists beside an empty lock" >&2
-            exit 1
-          fi
-          if grep -Eq '^\[\[package\]\]$|^(source|checksum|git)[[:space:]]*=' .zpkg.lock; then
-            echo "empty-lock contract contains dependency resolution data" >&2
-            exit 1
-          fi
-
-      - name: Reject registry credentials and private keys in package contract files
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -RInE \
-            -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|tskey-(auth|client)-[A-Za-z0-9_-]{16,}|NPM_TOKEN[[:space:]]*=|CARGO_REGISTRY_TOKEN[[:space:]]*=|PUB_TOKEN[[:space:]]*=' \
-            .zpkg.toml .zpkg.lock tools/zpkg-contract.test.mjs docs/zed-package.md; then
-            echo "credential/private-key pattern detected" >&2
-            exit 1
-          fi
