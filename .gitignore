@@ -14,3 +14,7 @@ sdk/admin/dist/
 # Scratch / git worktrees (tmp/worktrees/*)
 tmp/
 pkg-node/
+tmp
+temp
+tmp/worktrees
+temp/worktrees
