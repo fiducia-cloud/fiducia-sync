@@ -20,11 +20,11 @@ const policy = (overrides = {}) => ({
   ...overrides,
 });
 let n = 0;
-async function setup() {
+async function setup(clientOptions = {}) {
   n += 1;
   const store = await openStore(`client-test-${n}`, ["api_keys"]);
   const queue = makeQueue(store);
-  const client = makeSyncClient({ store, queue, core });
+  const client = makeSyncClient({ store, queue, core, ...clientOptions });
   return { store, queue, client };
 }
 
@@ -132,7 +132,14 @@ test("pessimistic writes do not become visible until the server acknowledges", a
 });
 
 test("throw_error and emit_only preserve durable retries with distinct caller behavior", async (t) => {
-  const { store, queue, client } = await setup();
+  const telemetryEvents = [];
+  const { store, queue, client } = await setup({
+    telemetry: {
+      emit(event, context) {
+        telemetryEvents.push({ event, context });
+      },
+    },
+  });
   t.after(() => store.close());
   const offline = async () => {
     throw new Error("offline");
@@ -159,6 +166,12 @@ test("throw_error and emit_only preserve durable retries with distinct caller be
   );
   assert.deepEqual(emitted, { status: "queued", attempts: 1 });
   assert.equal((await queue.list()).length, 2);
+  assert.deepEqual(
+    telemetryEvents.map(({ event }) => event.phase),
+    ["failed", "retry_scheduled"],
+  );
+  const serialized = JSON.stringify(telemetryEvents);
+  assert.doesNotMatch(serialized, /offline|"emit"|"name"|"b"/);
 });
 
 test("lifecycle telemetry is low-cardinality and never contains row identity or payload", async (t) => {

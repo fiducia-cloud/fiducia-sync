@@ -1,0 +1,77 @@
+name: opto-sync wrapper contract
+
+on:
+  pull_request:
+    paths:
+      - .zpkg.toml
+      - .zpkg.lock
+      - opto-sync-adapter.json
+      - tests/e2e/test_opto_sync_wrapper.py
+      - .github/workflows/opto-sync-wrapper.yml
+  workflow_dispatch:
+    inputs:
+      live_install:
+        description: Install and inspect the certified artifact from the committed lock
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  ZED_CLI_SHA: a850dbcc799aeaccf1093741ab58439a049c14c9
+  ZED_INTERFACES_SHA: c2e049006453c26ca8ca291783f681fce75cb01f
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Run dependency, adapter-boundary, and dual-plane E2E contracts
+        run: python3 -m unittest discover -s tests/e2e -p 'test_opto_sync_wrapper.py' -v
+
+  live-install:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_install }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: zed-pkg/zed-cli
+          ref: ${{ env.ZED_CLI_SHA }}
+          path: .tools/zed-cli
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: zed-pkg/zed-interfaces
+          ref: ${{ env.ZED_INTERFACES_SHA }}
+          path: .tools/zed-interfaces
+          persist-credentials: false
+      - name: Build pinned Zed CLI with its sibling interface crate
+        run: cargo build --locked --release --manifest-path .tools/zed-cli/Cargo.toml --bin zed
+      - name: Frozen-install and verify native targets and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/.tools/zed-cli/target/release/zed" install --frozen --install-mode copy
+          python3 - <<'PY'
+          import json, pathlib, re, tomllib
+          profile = json.loads(pathlib.Path('opto-sync-adapter.json').read_text())
+          expected = {'rust': 'Cargo.toml', 'typescript': 'package.json', 'dart': 'pubspec.yaml', 'gleam': 'gleam.toml'}
+          for language, adapter in profile['nativeAdapters'].items():
+              target = pathlib.Path(adapter['path']) / expected[language]
+              assert target.is_file(), f'missing installed adapter: {target}'
+          package = next(p for p in tomllib.loads(pathlib.Path('.zpkg.lock').read_text()).get('package', []) if p.get('org') == 'opto-sync' and p.get('name') == 'opto-sync-clients')
+          assert re.fullmatch(r'[0-9a-f]{64}', package['sha256'])
+          assert package['size'] > 0 and package['format'] and package['vcs_tag'] and package['source']
+          assert re.fullmatch(r'[0-9a-f]{40}', package['vcs_commit'])
+          PY
