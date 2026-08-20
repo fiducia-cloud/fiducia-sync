@@ -1,6 +1,6 @@
 # CI/reproducible container that builds and runs the native `cargo test` suite
 # for fiducia-sync-core (no wasm/browser toolchain).
-FROM rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
 ENV HOME=/tmp \
     CARGO_HOME=/tmp/cargo
 WORKDIR /workspace
