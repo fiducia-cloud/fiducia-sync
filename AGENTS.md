@@ -32,3 +32,18 @@ Every repository in this GitHub org maps to that Linear project unless a nested 
 8. Fetch again and repeat from step 1 until every writable repo has a clean tree, local `main` equals `origin/main`, all intended branch/worktree work is represented in `main`, checks pass or a concrete Linear blocker is filed, and conflict-marker scans are clean.
 
 Do not claim completion if any repository, branch, worktree, failure, or read-only exception was silently skipped. Report the exact final state and link remaining Linear issues and pull requests.
+
+## Functional programming conformance
+
+This repository carries an FP conformance ratchet. Before you land a change:
+
+```sh
+python3 tools/fp-conformance/fp_conformance.py .
+```
+
+CI compares your findings against `tools/fp-conformance/budget.json` and fails
+only when a rule's count *increases*. Do not raise the budget to get green — fix
+the new violations. When you clear a class of violation, lower the budget in the
+same commit with `--write-budget`.
+
+The principles, the rule codes and the remedy for each are in `FP-GUIDELINES.md`.
