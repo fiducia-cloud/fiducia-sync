@@ -49,6 +49,6 @@
     "esbuild": "^0.28.2",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^7.0.2",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   }
 }
