@@ -93,7 +93,7 @@ jobs:
               {"target": "dart", "package": "fiducia/fiducia-sync-flutter", "version": "0.2.0", "dir": "dart"},
               {"target": "nodejs", "package": "fiducia/fiducia-sync-sdk", "version": "0.2.0", "dir": "sdk"},
               {"target": "rust", "package": "fiducia/fiducia-sync-core", "version": "0.2.0", "dir": "."},
-              {"target": "rust-postgres", "package": "fiducia/fiducia-sync-postgres", "version": "0.2.0", "dir": "crates/postgres"},
+              {"target": "rust-postgres", "package": "fiducia/fiducia-sync-postgres", "version": "0.2.0", "dir": "langs/rust/postgres"},
               {"target": "schema", "package": "fiducia/fiducia-sync-schema", "version": "0.2.0", "dir": "schema"},
               {"target": "sql", "package": "fiducia/fiducia-sync-sql", "version": "0.2.0", "dir": "sql"},
           ]

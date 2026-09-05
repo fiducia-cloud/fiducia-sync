@@ -104,7 +104,7 @@ jobs:
       - name: build node-target wasm
         run: wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
       - name: sdk tests
-        working-directory: sdk
+        working-directory: langs/typescript
         run: |
           npm ci --ignore-scripts
           node scripts/embed-sync-schema.mjs --check
@@ -127,7 +127,7 @@ jobs:
           channel: stable
           cache: true
       - name: Flutter checks
-        working-directory: dart
+        working-directory: langs/dart
         run: |
           flutter pub get
           dart format --output=none --set-exit-if-changed lib test

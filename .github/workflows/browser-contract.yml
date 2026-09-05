@@ -49,10 +49,10 @@ jobs:
           cache: npm
           cache-dependency-path: langs/typescript/package-lock.json
       - name: Install the locked SDK toolchain
-        working-directory: sdk
+        working-directory: langs/typescript
         run: npm ci --ignore-scripts
       - name: Validate the browser harness and SDK types
-        working-directory: sdk
+        working-directory: langs/typescript
         run: |
           node --check tests/browser/chrome-cdp.mjs
           node --check tests/browser/browser-smoke.mjs
@@ -69,7 +69,7 @@ jobs:
           "$chrome" --version
           echo "path=$chrome" >> "$GITHUB_OUTPUT"
       - name: Exercise IndexedDB and localStorage in real Chrome
-        working-directory: sdk
+        working-directory: langs/typescript
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.path }}
         run: npm run test:browser
