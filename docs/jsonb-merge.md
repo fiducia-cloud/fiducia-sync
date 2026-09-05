@@ -16,7 +16,7 @@ whole-row replacement drops them.
 
 `client.optimisticPatch(table, id, patch, send)`:
 
-1. **Local**: `deepMerge(existingRow, patch)` (see `sdk/src/merge.mjs`) and store the
+1. **Local**: `deepMerge(existingRow, patch)` (see `langs/typescript/src/merge.mjs`) and store the
    result, dirty — so the UI updates instantly with siblings intact.
 2. **Wire**: send the **merged whole value** (not the bare patch). The backends
    `COALESCE` a column wholesale, so a bare partial `jsonb` would clobber siblings
@@ -54,7 +54,7 @@ whole-row replacement drops them.
 - **Opaque objects.** Non-plain objects (Date, Map, class instances) replace rather
   than being half-merged into a corrupt shape.
 
-Covered by `sdk/tests/jsonb.test.mjs` (10) + `sdk/tests/jsonb-hardening.test.mjs` (9).
+Covered by `langs/typescript/tests/jsonb.test.mjs` (10) + `langs/typescript/tests/jsonb-hardening.test.mjs` (9).
 
 ## Comparison with public solutions
 

@@ -14,15 +14,15 @@ test("generated embeds (sync-schema.mjs, sync_schema.dart) match the generator",
     assert.equal(
       readFileSync(path, "utf8"),
       content,
-      `${path} drifted — run: node sdk/scripts/embed-sync-schema.mjs`,
+      `${path} drifted — run: node langs/typescript/scripts/embed-sync-schema.mjs`,
     );
   }
 });
 
 test("vendored schema matches the canonical fiducia-interfaces copy (soft)", (t) => {
-  const vendored = fileURLToPath(new URL("../../schema/sync.schema.json", import.meta.url));
+  const vendored = fileURLToPath(new URL("../../../schema/sync.schema.json", import.meta.url));
   const canonical = fileURLToPath(
-    new URL("../../../fiducia-interfaces/schema/sync.schema.json", import.meta.url),
+    new URL("../../../../fiducia-interfaces/schema/sync.schema.json", import.meta.url),
   );
   if (!existsSync(canonical)) {
     t.skip("fiducia-interfaces sibling checkout not present");

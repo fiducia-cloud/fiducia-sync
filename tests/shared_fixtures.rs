@@ -1,6 +1,6 @@
 //! Pins the cross-language contract: the Rust core must reproduce the SAME
-//! results as the JS SDK (`sdk/tests/validate.test.mjs`, `hlc.test.mjs`) and
-//! the Dart package (`dart/test/*`) over the shared fixture files under
+//! results as the JS SDK (`langs/typescript/tests/validate.test.mjs`, `hlc.test.mjs`) and
+//! the Dart package (`langs/dart/test/*`) over the shared fixture files under
 //! `schema/fixtures/`. If one runtime changes behavior, its fixture run — not
 //! a human — catches the drift.
 

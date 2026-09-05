@@ -9,7 +9,7 @@ authoritative ordering keys (nothing about reconciliation reads a clock).
 ## Server side: monotonic `updated_at`, immutable `created_at`
 
 `fiducia_sync.install_timestamps(table)` (in `sql/postgres/001_fiducia_sync.sql`,
-mirrored at `crates/postgres/migrations/`) attaches a BEFORE INSERT/UPDATE
+mirrored at `langs/rust/postgres/migrations/`) attaches a BEFORE INSERT/UPDATE
 trigger with CockroachDB-flavored rules:
 
 - **`updated_at` is strictly monotonic per row** —
@@ -54,7 +54,7 @@ NOT exist server-side. Each store records it locally:
 
 ## The Hybrid Logical Clock
 
-`src/hlc.rs` (canonical), `sdk/src/hlc.mjs`, and `dart/lib/src/hlc.dart`
+`src/hlc.rs` (canonical), `langs/typescript/src/hlc.mjs`, and `langs/dart/lib/src/hlc.dart`
 implement the same HLC (Kulkarni et al. — the scheme CockroachDB uses for
 transaction timestamps), pinned to the shared vectors in
 `schema/fixtures/hlc-vectors.json`:

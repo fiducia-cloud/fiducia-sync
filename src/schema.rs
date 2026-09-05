@@ -5,8 +5,8 @@
 //! wire envelopes; this repo vendors a byte-identical copy at
 //! `schema/sync.schema.json` (a soft drift test in the SDK compares the two
 //! when the sibling checkout is present, mirroring fiducia-interfaces' own
-//! pg-defs drift guard). The validator here, `sdk/src/validate.mjs`, and
-//! `dart/lib/src/schema.dart` implement the same JSON Schema subset and are
+//! pg-defs drift guard). The validator here, `langs/typescript/src/validate.mjs`, and
+//! `langs/dart/lib/src/schema.dart` implement the same JSON Schema subset and are
 //! pinned to shared fixtures (`schema/fixtures/sync-envelopes.json`), so a
 //! payload accepted on one runtime is accepted on all of them.
 //!

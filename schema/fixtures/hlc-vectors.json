@@ -1,5 +1,5 @@
 {
-  "description": "Cross-language Hybrid Logical Clock vectors. Each case seeds a clock from `start`, applies `steps` in order, and asserts the canonical encoded stamp after every step. Rust (src/hlc.rs), JS (sdk/src/hlc.mjs), and Dart (dart/lib/src/hlc.dart) must all reproduce these exactly.",
+  "description": "Cross-language Hybrid Logical Clock vectors. Each case seeds a clock from `start`, applies `steps` in order, and asserts the canonical encoded stamp after every step. Rust (src/hlc.rs), JS (langs/typescript/src/hlc.mjs), and Dart (langs/dart/lib/src/hlc.dart) must all reproduce these exactly.",
   "cases": [
     {
       "name": "tick advances with the wall clock and counts within one millisecond",

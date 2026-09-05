@@ -8,7 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// core (tests/shared_fixtures.rs) and JS SDK over the shared fixture files.
 void main() {
   Map<String, Object?> loadFixture(String name) {
-    final file = File('../schema/fixtures/$name');
+    final file = File('../../schema/fixtures/$name');
     expect(
       file.existsSync(),
       isTrue,

@@ -16,7 +16,7 @@ import {
 import { SYNC_SCHEMA } from "../src/sync-schema.mjs";
 
 const fixtures = JSON.parse(
-  readFileSync(new URL("../../schema/fixtures/sync-envelopes.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../../../schema/fixtures/sync-envelopes.json", import.meta.url), "utf8"),
 );
 
 test("shared fixture cases all agree with the canonical schema", () => {

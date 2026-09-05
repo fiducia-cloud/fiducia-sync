@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { makeHlc, encodeHlc, decodeHlc, HLC_MAX_COUNTER } from "../src/hlc.mjs";
 
 const vectors = JSON.parse(
-  readFileSync(new URL("../../schema/fixtures/hlc-vectors.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../../../schema/fixtures/hlc-vectors.json", import.meta.url), "utf8"),
 );
 
 test("shared cross-language vectors replay identically", () => {

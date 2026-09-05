@@ -5,7 +5,7 @@
 import "fake-indexeddb/auto";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import * as wasm from "../../pkg-node/fiducia_sync_core.js";
+import * as wasm from "../../../pkg-node/fiducia_sync_core.js";
 import { deepMerge } from "../src/merge.mjs";
 import { openStore, makeQueue } from "../src/store.mjs";
 import { wrapCore } from "../src/core.mjs";

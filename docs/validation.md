@@ -13,8 +13,8 @@ fiducia-interfaces/schema/sync.schema.json     (canonical, upstream)
    ▼
 schema/sync.schema.json
    ├── include_str! → src/schema.rs            Rust:  SchemaValidator::sync()
-   ├── generated    → sdk/src/sync-schema.mjs  TS/JS: makeValidator(), zodSchemas(z)
-   └── generated    → dart/lib/src/sync_schema.dart  Dart: SchemaValidator.sync()
+   ├── generated    → langs/typescript/src/sync-schema.mjs  TS/JS: makeValidator(), zodSchemas(z)
+   └── generated    → langs/dart/lib/src/sync_schema.dart  Dart: SchemaValidator.sync()
 schema/fixtures/sync-envelopes.json            shared valid/invalid cases —
                                                all three test suites run them
 schema/fixtures/hlc-vectors.json               shared HLC replay vectors
@@ -23,8 +23,8 @@ schema/fixtures/hlc-vectors.json               shared HLC replay vectors
 Regenerate the embeds after updating the vendored schema:
 
 ```sh
-node sdk/scripts/embed-sync-schema.mjs          # write
-node sdk/scripts/embed-sync-schema.mjs --check  # drift gate (also run by npm test)
+node langs/typescript/scripts/embed-sync-schema.mjs          # write
+node langs/typescript/scripts/embed-sync-schema.mjs --check  # drift gate (also run by npm test)
 ```
 
 ## The subset engine (fails closed)

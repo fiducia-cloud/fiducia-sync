@@ -50,7 +50,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --locked --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-targets --all-features --locked
-      - run: cmp sql/postgres/001_fiducia_sync.sql crates/postgres/migrations/001_fiducia_sync.sql
+      - run: cmp sql/postgres/001_fiducia_sync.sql langs/rust/postgres/migrations/001_fiducia_sync.sql
       - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2
         with:
           tool: cargo-audit@0.22.2
@@ -104,7 +104,7 @@ jobs:
       - name: build node-target wasm
         run: wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
       - name: sdk tests
-        working-directory: sdk
+        working-directory: langs/typescript
         run: |
           npm ci --ignore-scripts
           node scripts/embed-sync-schema.mjs --check
@@ -127,7 +127,7 @@ jobs:
           channel: stable
           cache: true
       - name: Flutter checks
-        working-directory: dart
+        working-directory: langs/dart
         run: |
           flutter pub get
           dart format --output=none --set-exit-if-changed lib test

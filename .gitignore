@@ -3,13 +3,13 @@ target/
 Cargo.lock
 pkg/
 pkg-web/
-sdk/pkg/
+langs/typescript/pkg/
 dist/
-sdk/admin/dist/
-dart/.dart_tool/
-dart/.flutter-plugins-dependencies
-dart/build/
-dart/pubspec.lock
+langs/typescript/admin/dist/
+langs/dart/.dart_tool/
+langs/dart/.flutter-plugins-dependencies
+langs/dart/build/
+langs/dart/pubspec.lock
 # --- environment / secrets (sops + age) -------------------------------------
 # Only env/enc/*.env.enc is tracked. Every plaintext form stays out of git;
 # `just env-check` enforces it. See env/README.md.

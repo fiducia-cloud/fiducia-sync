@@ -26,9 +26,9 @@ function filesWithExtension(relativeRoot, extension) {
 const manifest = read(".zpkg.toml");
 const lock = read(".zpkg.lock");
 const cargo = read("Cargo.toml");
-const postgresCargo = read("crates/postgres/Cargo.toml");
-const sdkPackage = JSON.parse(read("sdk/package.json"));
-const dartPubspec = read("dart/pubspec.yaml");
+const postgresCargo = read("langs/rust/postgres/Cargo.toml");
+const sdkPackage = JSON.parse(read("langs/typescript/package.json"));
+const dartPubspec = read("langs/dart/pubspec.yaml");
 
 function section(text, name) {
   const lines = text.split(/\r?\n/u);
@@ -54,7 +54,7 @@ function quoted(text, key, label = key) {
 
 function yamlScalar(text, key) {
   const match = text.match(new RegExp(`^${key}:\\s*["']?([^"'#\\s]+)["']?\\s*(?:#.*)?$`, "m"));
-  assert(match, `dart/pubspec.yaml must declare top-level ${key}`);
+  assert(match, `langs/dart/pubspec.yaml must declare top-level ${key}`);
   return match[1];
 }
 
@@ -82,9 +82,9 @@ const zedRepository = section(manifest, "package.repository");
 
 const expectedTargets = {
   rust: { dir: ".", name: "fiducia-sync-core" },
-  "rust-postgres": { dir: "crates/postgres", name: "fiducia-sync-postgres" },
-  nodejs: { dir: "sdk", name: "fiducia-sync-sdk" },
-  dart: { dir: "dart", name: "fiducia-sync-flutter" },
+  "rust-postgres": { dir: "langs/rust/postgres", name: "fiducia-sync-postgres" },
+  nodejs: { dir: "langs/typescript", name: "fiducia-sync-sdk" },
+  dart: { dir: "langs/dart", name: "fiducia-sync-flutter" },
   sql: { dir: "sql", name: "fiducia-sync-sql" },
   schema: { dir: "schema", name: "fiducia-sync-schema" },
 };
@@ -168,18 +168,21 @@ test("publish exclusions cover generated, dependency, CI, docs, and test trees",
   ]) {
     assert.ok(publish.includes(excluded), `missing publish exclusion ${excluded}`);
   }
-  assert.doesNotMatch(publish, /Cargo\.toml|sdk\/package\.json|dart\/pubspec\.yaml|sql\/\*\*|schema\/\*\*/);
+  assert.doesNotMatch(
+    publish,
+    /Cargo\.toml|langs\/typescript\/package\.json|langs\/dart\/pubspec\.yaml|sql\/\*\*|schema\/\*\*/,
+  );
 });
 
 test("package script is bounded to tests and performs no publication or credential action", () => {
   const scripts = section(manifest, "scripts");
   const command = quoted(scripts, "test");
-  assert.equal(command, "cargo test --locked --workspace --all-targets && npm test --prefix sdk");
+  assert.equal(command, "cargo test --locked --workspace --all-targets && npm test --prefix langs/typescript");
   assert.doesNotMatch(command, /publish|login|token|curl|wget|git push|npm config/);
 });
 
 test("SDK emit-only regression test enables error telemetry instead of weakening policy", () => {
-  const clientTests = read("sdk/tests/client.test.mjs");
+  const clientTests = read("langs/typescript/tests/client.test.mjs");
   const strictPolicy = 'policy: policy({ failure_mode: "emit_only", telemetry: "errors" })';
   const telemetryLessPolicy = 'policy: policy({ failure_mode: "emit_only" })';
   assert.ok(clientTests.includes(strictPolicy), "emit-only SDK test must enable error telemetry");

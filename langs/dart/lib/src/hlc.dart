@@ -1,5 +1,5 @@
 /// Hybrid Logical Clock — the Dart mirror of the canonical Rust implementation
-/// (`src/hlc.rs`) and the JS SDK (`sdk/src/hlc.mjs`), pinned to the same
+/// (`src/hlc.rs`) and the JS SDK (`langs/typescript/src/hlc.mjs`), pinned to the same
 /// shared vectors (`schema/fixtures/hlc-vectors.json`).
 ///
 /// Phone clocks jump (NTP steps, timezone fixes, users editing the clock), so
