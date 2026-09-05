@@ -43,12 +43,22 @@
     "prepack": "npm run build:wasm",
     "build:wasm": "cd .. && wasm-pack build --target bundler --out-dir sdk/pkg -- --package fiducia-sync-core --features wasm --locked && node sdk/scripts/allow-generated-wasm-in-npm.mjs",
     "build:wasm-web": "cd .. && wasm-pack build --target web --out-dir pkg-web -- --package fiducia-sync-core --features wasm --locked",
-    "build:admin-bundle": "npm run build:wasm-web && esbuild admin/entry.mjs --bundle --format=iife --target=es2020 --loader:.wasm=binary --outfile=admin/dist/fiducia-sync-admin.js && cp admin/dist/fiducia-sync-admin.js ../../fiducia-admin.rs/assets/fiducia-sync.js"
+    "build:admin-bundle": "npm run build:wasm-web && esbuild admin/entry.mjs --bundle --format=iife --target=es2020 --loader:.wasm=binary --outfile=admin/dist/fiducia-sync-admin.js && cp admin/dist/fiducia-sync-admin.js ../../fiducia-admin.rs/assets/fiducia-sync.js",
+    "lint:ores": "if [ -f ../.ores-lint/lint.sh ]; then sh ../.ores-lint/lint.sh; else echo 'ores-lint not installed'; fi",
+    "prepublishOnly": "npm run lint:ores"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",
     "fake-indexeddb": "^6.0.0",
     "typescript": "^7.0.2",
     "zod": "^4.4.3"
+  },
+  "oresLint": {
+    "note": "Declared, not installed. ores-lint resolves these from a global install - see .ores-lint/README.md",
+    "requires": {
+      "eslint": ">=9",
+      "typescript-eslint": ">=8 (optional; without it .ts files are skipped)"
+    },
+    "install": "npm i -g eslint typescript-eslint"
   }
 }
