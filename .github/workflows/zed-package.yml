@@ -90,8 +90,8 @@ jobs:
           }, plan["source"]
 
           expected_zed = [
-              {"target": "dart", "package": "fiducia/fiducia-sync-flutter", "version": "0.2.0", "dir": "dart"},
-              {"target": "nodejs", "package": "fiducia/fiducia-sync-sdk", "version": "0.2.0", "dir": "sdk"},
+              {"target": "dart", "package": "fiducia/fiducia-sync-flutter", "version": "0.2.0", "dir": "langs/dart"},
+              {"target": "nodejs", "package": "fiducia/fiducia-sync-sdk", "version": "0.2.0", "dir": "langs/typescript"},
               {"target": "rust", "package": "fiducia/fiducia-sync-core", "version": "0.2.0", "dir": "."},
               {"target": "rust-postgres", "package": "fiducia/fiducia-sync-postgres", "version": "0.2.0", "dir": "langs/rust/postgres"},
               {"target": "schema", "package": "fiducia/fiducia-sync-schema", "version": "0.2.0", "dir": "schema"},
@@ -100,14 +100,14 @@ jobs:
           assert plan["zed"] == expected_zed, plan["zed"]
 
           expected_native = [
-              {"target": "dart", "registry": "pub.dev", "package": "fiducia_sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "dart"},
-              {"target": "nodejs", "registry": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "sdk"},
+              {"target": "dart", "registry": "pub.dev", "package": "fiducia_sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "langs/dart"},
+              {"target": "nodejs", "registry": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "langs/typescript"},
           ]
           assert plan["native"] == expected_native, plan["native"]
           assert all(route["target"] not in {"rust", "rust-postgres"} for route in plan["native"]), plan["native"]
 
           expected_forge = [
-              {"target": "nodejs", "registry": "github-packages", "format": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "sdk"},
+              {"target": "nodejs", "registry": "github-packages", "format": "npm", "package": "@fiducia/sync", "version": "0.2.0", "vcs_tag": "v0.2.0", "dir": "langs/typescript"},
           ]
           assert plan["forge"] == expected_forge, plan["forge"]
           PY
