@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/postgres"]
-default-members = [".", "crates/postgres"]
+members = ["langs/rust/postgres"]
+default-members = [".", "langs/rust/postgres"]
 resolver = "2"
 
 # Crate manifest for fiducia-sync-core: the transport-agnostic sync core. Builds

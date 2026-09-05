@@ -33,14 +33,14 @@ browser IO:
 fiducia-sync
 ├── fiducia-sync-core (Rust)         # reconcile(), resolve_conflict(), on_ack(), QueuedWrite,
 │     │                              #   Hlc, SchemaValidator (canonical utility twins)
-│     └── wasm-bindgen  → sdk/pkg/   # npm-contained wasm + JS glue
+│     └── wasm-bindgen  → langs/typescript/pkg/   # npm-contained wasm + JS glue
 ├── schema/                          # vendored canonical sync.schema.json (byte-identical to
 │   └── fixtures/                    #   fiducia-interfaces) + cross-language test fixtures
-├── crates/postgres/                 # SeaORM adapter for the shared change journal
+├── langs/rust/postgres/                 # SeaORM adapter for the shared change journal
 ├── sql/postgres/                    # idempotent Postgres migration + PostgREST RPC
 │                                    #   + install_timestamps (monotonic updated_at)
-├── dart/                            # Flutter package: SQLite + Supabase (+ hlc/schema mirrors)
-└── sdk/src/                         # @fiducia/sync browser package
+├── langs/dart/                            # Flutter package: SQLite + Supabase (+ hlc/schema mirrors)
+└── langs/typescript/src/                         # @fiducia/sync browser package
     ├── store.mjs       # IndexedDB persistence + the durable write-queue (per-plane DB,
     │                   #   safe version upgrades add tables without losing rows/queue)
     ├── local-storage.mjs # localStorage adapter + explicit IndexedDB fallback selection
@@ -66,8 +66,8 @@ Server-side, `fiducia_sync.install_timestamps(table)` (in
 `sql/postgres/001_fiducia_sync.sql`) makes `updated_at` strictly monotonic per
 row — `greatest(clock_timestamp(), old.updated_at + 1µs)`, so a stepped-back
 clock can never regress it — and `created_at` immutable after birth. A
-cross-runtime Hybrid Logical Clock utility (`src/hlc.rs`, `sdk/src/hlc.mjs`,
-`dart/lib/src/hlc.dart`, pinned to `schema/fixtures/hlc-vectors.json`) provides
+cross-runtime Hybrid Logical Clock utility (`src/hlc.rs`, `langs/typescript/src/hlc.mjs`,
+`langs/dart/lib/src/hlc.dart`, pinned to `schema/fixtures/hlc-vectors.json`) provides
 device-monotonic advisory stamps for ordering offline edits under clock skew;
 the per-row `version` and plane-wide `sync_sequence` remain the only
 authoritative ordering keys. See [docs/timestamps.md](docs/timestamps.md).
@@ -78,7 +78,7 @@ validation in all three languages — `SchemaValidator::sync()` (Rust),
 `makeValidator()`/`assertSyncEnvelope()`/`zodSchemas(z)` (TS/JS,
 `@fiducia/sync/validate`), `SchemaValidator.sync()` (Dart) — all pinned to the
 shared fixtures in `schema/fixtures/` and guarded by an embed drift gate
-(`node sdk/scripts/embed-sync-schema.mjs --check`). See
+(`node langs/typescript/scripts/embed-sync-schema.mjs --check`). See
 [docs/validation.md](docs/validation.md).
 
 ## Ordering: row versions and the catch-up cursor
@@ -332,8 +332,8 @@ See `docs/README.md`.
 
 - ✅ `fiducia-sync-core` — reconcile, token-aware echo rules, and total version
   handling, covered by unit and public-API integration tests.
-- ✅ wasm-bindgen bindings (`src/wasm.rs`) — `npm --prefix sdk run build:wasm`
-  produces the self-contained npm artifact under `sdk/pkg/`.
+- ✅ wasm-bindgen bindings (`src/wasm.rs`) — `npm --prefix langs/typescript run build:wasm`
+  produces the self-contained npm artifact under `langs/typescript/pkg/`.
 - ✅ JS shim — migration-safe IndexedDB plus explicit localStorage fallback,
   enum-driven local/optimistic/pessimistic writes, privacy-safe telemetry, both
   transports, hx-optimistic extension, `startSync`, catch-up hydration,
@@ -352,20 +352,20 @@ cargo test --workspace --locked      # core + SeaORM/Postgres adapter
 
 # SDK tests use the real node-target WASM core.
 wasm-pack build --target nodejs --out-dir pkg-node -- --package fiducia-sync-core --features wasm --locked
-npm --prefix sdk test
-npm --prefix sdk run typecheck
+npm --prefix langs/typescript test
+npm --prefix langs/typescript run typecheck
 
 # Mobile package.
-(cd dart && flutter analyze && flutter test)
+(cd langs/dart && flutter analyze && flutter test)
 
 # Browser WASM package. Needs a rustup toolchain WITH the wasm32-unknown-unknown
 # target — a Homebrew-only rustc will not work (no wasm std in its sysroot). If
 # `rustc` resolves to Homebrew, put the rustup toolchain first, e.g.:
 #   PATH="$(dirname "$(rustup which rustc)"):$PATH" wasm-pack build ...
-npm --prefix sdk run build:wasm
+npm --prefix langs/typescript run build:wasm
 ```
 
-The `sdk/pkg/` output (gitignored) is the wasm module included by npm prepack.
+The `langs/typescript/pkg/` output (gitignored) is the wasm module included by npm prepack.
 
 The root Dockerfile is a locked **test image**, not a network service or browser
 runtime. It copies `Cargo.lock`, resolves with `--locked`, and builds and runs as

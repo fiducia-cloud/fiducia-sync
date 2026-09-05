@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fiducia-cloud/fiducia-sync.git",
-    "directory": "sdk"
+    "directory": "langs/typescript"
   },
   "files": [
     "pkg",
@@ -41,9 +41,9 @@
     "generate:schema": "node scripts/embed-sync-schema.mjs",
     "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --lib ES2022,DOM tests/types.test.ts",
     "prepack": "npm run build:wasm",
-    "build:wasm": "cd .. && wasm-pack build --target bundler --out-dir sdk/pkg -- --package fiducia-sync-core --features wasm --locked && node sdk/scripts/allow-generated-wasm-in-npm.mjs",
-    "build:wasm-web": "cd .. && wasm-pack build --target web --out-dir pkg-web -- --package fiducia-sync-core --features wasm --locked",
-    "build:admin-bundle": "npm run build:wasm-web && esbuild admin/entry.mjs --bundle --format=iife --target=es2020 --loader:.wasm=binary --outfile=admin/dist/fiducia-sync-admin.js && cp admin/dist/fiducia-sync-admin.js ../../fiducia-admin.rs/assets/fiducia-sync.js"
+    "build:wasm": "cd ../.. && wasm-pack build --target bundler --out-dir langs/typescript/pkg -- --package fiducia-sync-core --features wasm --locked && node langs/typescript/scripts/allow-generated-wasm-in-npm.mjs",
+    "build:wasm-web": "cd ../.. && wasm-pack build --target web --out-dir langs/typescript/pkg-web -- --package fiducia-sync-core --features wasm --locked",
+    "build:admin-bundle": "npm run build:wasm-web && esbuild admin/entry.mjs --bundle --format=iife --target=es2020 --loader:.wasm=binary --outfile=admin/dist/fiducia-sync-admin.js && cp admin/dist/fiducia-sync-admin.js ../../../fiducia-admin.rs/assets/fiducia-sync.js"
   },
   "devDependencies": {
     "esbuild": "^0.28.2",

@@ -6,22 +6,22 @@ on:
     paths:
       - ".github/workflows/browser-contract.yml"
       - ".github/workflows/ci.yml"
-      - "sdk/package.json"
-      - "sdk/package-lock.json"
-      - "sdk/src/store.mjs"
-      - "sdk/src/local-storage.mjs"
-      - "sdk/src/merge.mjs"
-      - "sdk/tests/browser/**"
+      - "langs/typescript/package.json"
+      - "langs/typescript/package-lock.json"
+      - "langs/typescript/src/store.mjs"
+      - "langs/typescript/src/local-storage.mjs"
+      - "langs/typescript/src/merge.mjs"
+      - "langs/typescript/tests/browser/**"
   pull_request:
     paths:
       - ".github/workflows/browser-contract.yml"
       - ".github/workflows/ci.yml"
-      - "sdk/package.json"
-      - "sdk/package-lock.json"
-      - "sdk/src/store.mjs"
-      - "sdk/src/local-storage.mjs"
-      - "sdk/src/merge.mjs"
-      - "sdk/tests/browser/**"
+      - "langs/typescript/package.json"
+      - "langs/typescript/package-lock.json"
+      - "langs/typescript/src/store.mjs"
+      - "langs/typescript/src/local-storage.mjs"
+      - "langs/typescript/src/merge.mjs"
+      - "langs/typescript/tests/browser/**"
   workflow_dispatch:
 
 permissions:
@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: "22.22.1"
           cache: npm
-          cache-dependency-path: sdk/package-lock.json
+          cache-dependency-path: langs/typescript/package-lock.json
       - name: Install the locked SDK toolchain
         working-directory: sdk
         run: npm ci --ignore-scripts

@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/fiducia-cloud/fiducia-sync"
 
 [dependencies]
-fiducia-sync-core = { version = "0.2.0", path = "../.." }
+fiducia-sync-core = { version = "0.2.0", path = "../../.." }
 sea-orm = { version = "2.0.0", default-features = false, features = [
   "runtime-tokio-rustls",
   "sqlx-postgres",

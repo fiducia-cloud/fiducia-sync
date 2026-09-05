@@ -2,7 +2,7 @@
 //! surface the wasm ABI and the server-side reuse call). These pin two claims the
 //! README makes: reconcile is *total over any i64 version* (a hostile/stale change
 //! can never panic or wedge the engine), and the JSON the core emits is exactly
-//! the shape the TS shim (`sdk/src/core.mjs`) parses.
+//! the shape the TS shim (`langs/typescript/src/core.mjs`) parses.
 
 use fiducia_sync_core::{
     on_ack, reconcile, resolve_conflict, AckOutcome, ChangeEvent, ChangeOp, ConflictPolicy,
@@ -175,7 +175,7 @@ fn on_ack_is_total_at_extremes() {
 
 #[test]
 fn json_wire_shapes_match_the_ts_shim_contract() {
-    // sdk/src/core.mjs parses these exact shapes. If an enum's serde repr drifts,
+    // langs/typescript/src/core.mjs parses these exact shapes. If an enum's serde repr drifts,
     // the browser silently mis-reconciles — pin it here.
     let apply = serde_json::to_string(&reconcile(None, &ev(ChangeOp::Upsert, 1))).unwrap();
     assert_eq!(apply, "\"Apply\"");

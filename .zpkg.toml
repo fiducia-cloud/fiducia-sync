@@ -19,13 +19,13 @@ name = "fiducia-sync-core"
 # crate beneath an isolated directory or a separate reviewed release design.
 
 [targets.rust-postgres]
-dir = "crates/postgres"
+dir = "langs/rust/postgres"
 name = "fiducia-sync-postgres"
 ecosystem = "cargo"
 # Postgres crate remains at native version 0.1.0; its crates.io mirror is intentionally deferred.
 
 [targets.nodejs]
-dir = "sdk"
+dir = "langs/typescript"
 name = "fiducia-sync-sdk"
 
 [targets.nodejs.native]
@@ -34,7 +34,7 @@ package = "@fiducia/sync"
 forge = ["github-packages"]
 
 [targets.dart]
-dir = "dart"
+dir = "langs/dart"
 name = "fiducia-sync-flutter"
 
 [targets.dart.native]
@@ -56,8 +56,8 @@ exclude = [
   ".zpkg.lock",
   "**/node_modules/**",
   "**/target/**",
-  "dart/.dart_tool/**",
-  "dart/build/**",
+  "langs/dart/.dart_tool/**",
+  "langs/dart/build/**",
   "docs/**",
   "pkg-node/**",
   "tests/**",
@@ -65,4 +65,4 @@ exclude = [
 ]
 
 [scripts]
-test = "cargo test --locked --workspace --all-targets && npm test --prefix sdk"
+test = "cargo test --locked --workspace --all-targets && npm test --prefix langs/typescript"

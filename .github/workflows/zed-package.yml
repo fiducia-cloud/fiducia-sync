@@ -7,12 +7,12 @@ on:
       - .zpkg.lock
       - .zpkg.toml
       - Cargo.toml
-      - crates/postgres/Cargo.toml
-      - dart/pubspec.yaml
+      - langs/rust/postgres/Cargo.toml
+      - langs/dart/pubspec.yaml
       - docs/zed-package.md
       - schema/**
-      - sdk/package.json
-      - sdk/tests/client.test.mjs
+      - langs/typescript/package.json
+      - langs/typescript/tests/client.test.mjs
       - sql/**
       - tools/zpkg-contract.test.mjs
   push:

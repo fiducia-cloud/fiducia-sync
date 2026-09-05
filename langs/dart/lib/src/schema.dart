@@ -1,6 +1,6 @@
 /// Runtime validation for the canonical sync envelopes — the Dart mirror of
 /// the Rust subset validator (`src/schema.rs`) and the JS SDK
-/// (`sdk/src/validate.mjs`), driven by the SAME embedded JSON Schema
+/// (`langs/typescript/src/validate.mjs`), driven by the SAME embedded JSON Schema
 /// (`sync_schema.dart`, generated from the vendored
 /// `schema/sync.schema.json`) and pinned to the same shared fixtures.
 ///

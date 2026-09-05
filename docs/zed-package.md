@@ -49,7 +49,7 @@ release-set version:
 | `dart` | pub.dev | `fiducia_sync` | `0.2.0` |
 
 The Zed artifact is named `fiducia/fiducia-sync-sdk`; its native npm identity is
-`@fiducia/sync`, as declared by `sdk/package.json`. Those are separate package
+`@fiducia/sync`, as declared by `langs/typescript/package.json`. Those are separate package
 names serving separate registries and must not be conflated.
 
 The npm route also declares a GitHub Packages mirror of `@fiducia/sync`. This is
@@ -84,7 +84,7 @@ single crates.io package.
 
 ### Postgres native publication is deferred
 
-`crates/postgres/Cargo.toml` currently declares:
+`langs/rust/postgres/Cargo.toml` currently declares:
 
 ```text
 fiducia-sync-postgres 0.1.0
