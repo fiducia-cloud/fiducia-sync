@@ -13,6 +13,9 @@ url = "https://github.com/fiducia-cloud/fiducia-sync"
 [dependencies]
 "opto-sync/opto-sync-clients" = "^0.4.0"
 
+[install]
+dir = "zed_modules"
+
 [targets.rust]
 dir = "."
 name = "fiducia-sync-core"
