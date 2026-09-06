@@ -10,52 +10,101 @@ use serde_json::Value;
 const ENVELOPES: &str = include_str!("../schema/fixtures/sync-envelopes.json");
 const HLC_VECTORS: &str = include_str!("../schema/fixtures/hlc-vectors.json");
 
+fn field<'a>(value: &'a Value, name: &str, context: &str) -> Result<&'a Value, String> {
+    value
+        .get(name)
+        .ok_or_else(|| format!("{context} is missing field {name:?}"))
+}
+
+fn array_field<'a>(
+    value: &'a Value,
+    name: &str,
+    context: &str,
+) -> Result<&'a [Value], String> {
+    field(value, name, context)?
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{context}.{name} must be an array"))
+}
+
+fn string_field<'a>(value: &'a Value, name: &str, context: &str) -> Result<&'a str, String> {
+    field(value, name, context)?
+        .as_str()
+        .ok_or_else(|| format!("{context}.{name} must be a string"))
+}
+
+fn i64_field(value: &Value, name: &str, context: &str) -> Result<i64, String> {
+    field(value, name, context)?
+        .as_i64()
+        .ok_or_else(|| format!("{context}.{name} must be an i64"))
+}
+
+fn u32_field(value: &Value, name: &str, context: &str) -> Result<u32, String> {
+    let raw = field(value, name, context)?
+        .as_u64()
+        .ok_or_else(|| format!("{context}.{name} must be an unsigned integer"))?;
+    u32::try_from(raw).map_err(|_| format!("{context}.{name} must fit in u32"))
+}
+
 #[test]
-fn envelope_fixtures_validate_identically_via_the_public_api() {
-    let validator = SchemaValidator::sync().expect("embedded schema loads");
-    let fixtures: Value = serde_json::from_str(ENVELOPES).expect("fixtures parse");
-    let cases = fixtures["cases"].as_array().expect("cases array");
+fn envelope_fixtures_validate_identically_via_the_public_api() -> Result<(), String> {
+    let validator = SchemaValidator::sync().map_err(|error| error.to_string())?;
+    let fixtures: Value = serde_json::from_str(ENVELOPES)
+        .map_err(|error| format!("could not parse envelope fixtures: {error}"))?;
+    let cases = array_field(&fixtures, "cases", "envelope fixtures")?;
     assert!(cases.len() >= 20, "fixture file looks truncated");
-    for case in cases {
-        let name = case["name"].as_str().expect("case name");
-        let definition = case["definition"].as_str().expect("definition");
-        let expected = case["valid"].as_bool().expect("valid flag");
-        let outcome = validator.validate(definition, &case["value"]);
+
+    for (index, case) in cases.iter().enumerate() {
+        let context = format!("envelope fixture {index}");
+        let name = string_field(case, "name", &context)?;
+        let definition = string_field(case, "definition", &context)?;
+        let expected = field(case, "valid", &context)?
+            .as_bool()
+            .ok_or_else(|| format!("{context}.valid must be a boolean"))?;
+        let value = field(case, "value", &context)?;
+        let outcome = validator.validate(definition, value);
         assert_eq!(
             outcome.is_ok(),
             expected,
             "fixture {name:?}: expected valid={expected}, got {outcome:?}"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn hlc_vectors_replay_identically_via_the_public_api() {
-    let fixtures: Value = serde_json::from_str(HLC_VECTORS).expect("vectors parse");
-    let cases = fixtures["cases"].as_array().expect("cases array");
+fn hlc_vectors_replay_identically_via_the_public_api() -> Result<(), String> {
+    let fixtures: Value = serde_json::from_str(HLC_VECTORS)
+        .map_err(|error| format!("could not parse HLC vectors: {error}"))?;
+    let cases = array_field(&fixtures, "cases", "HLC fixtures")?;
     assert!(!cases.is_empty());
-    for case in cases {
-        let name = case["name"].as_str().expect("case name");
-        let start = &case["start"];
+
+    for (case_index, case) in cases.iter().enumerate() {
+        let context = format!("HLC fixture {case_index}");
+        let name = string_field(case, "name", &context)?;
+        let start = field(case, "start", &context)?;
         let mut clock = Hlc::from_state(
-            start["wall_ms"].as_i64().expect("start wall_ms"),
-            start["counter"].as_u64().expect("start counter") as u32,
+            i64_field(start, "wall_ms", &format!("{context}.start"))?,
+            u32_field(start, "counter", &format!("{context}.start"))?,
         );
-        for (index, step) in case["steps"].as_array().expect("steps").iter().enumerate() {
-            let stamp = match step["op"].as_str().expect("op") {
-                "tick" => clock.tick(step["now_ms"].as_i64().expect("now_ms")),
+
+        for (step_index, step) in array_field(case, "steps", &context)?.iter().enumerate() {
+            let step_context = format!("{context}.steps[{step_index}]");
+            let stamp = match string_field(step, "op", &step_context)? {
+                "tick" => clock.tick(i64_field(step, "now_ms", &step_context)?),
                 "observe" => clock.observe(
-                    step["remote_ms"].as_i64().expect("remote_ms"),
-                    step["now_ms"].as_i64().expect("now_ms"),
+                    i64_field(step, "remote_ms", &step_context)?,
+                    i64_field(step, "now_ms", &step_context)?,
                 ),
-                other => panic!("unknown vector op {other:?}"),
+                other => return Err(format!("{step_context}.op has unknown value {other:?}")),
             };
-            let expected = step["expect"].as_str().expect("expect");
+            let expected = string_field(step, "expect", &step_context)?;
             assert_eq!(
                 stamp.encode(),
                 expected,
-                "case {name:?} step {index} produced the wrong stamp"
+                "case {name:?} step {step_index} produced the wrong stamp"
             );
         }
     }
+    Ok(())
 }
