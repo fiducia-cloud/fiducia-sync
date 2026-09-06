@@ -16,11 +16,7 @@ fn field<'a>(value: &'a Value, name: &str, context: &str) -> Result<&'a Value, S
         .ok_or_else(|| format!("{context} is missing field {name:?}"))
 }
 
-fn array_field<'a>(
-    value: &'a Value,
-    name: &str,
-    context: &str,
-) -> Result<&'a [Value], String> {
+fn array_field<'a>(value: &'a Value, name: &str, context: &str) -> Result<&'a [Value], String> {
     field(value, name, context)?
         .as_array()
         .map(Vec::as_slice)
