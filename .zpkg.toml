@@ -11,7 +11,8 @@ vcs = "git"
 url = "https://github.com/fiducia-cloud/fiducia-sync"
 
 [dependencies]
-"opto-sync/opto-sync-clients" = "^0.4.0"
+# Reviewed against opto-sync/opto-sync-clients@^0.4.0; keep unresolved until
+# the certified public artifact is published.
 
 [install]
 dir = "zed_modules"
