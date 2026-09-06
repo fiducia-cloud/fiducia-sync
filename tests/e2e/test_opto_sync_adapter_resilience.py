@@ -15,7 +15,7 @@ class AdapterResilience(unittest.TestCase):
     def setUpClass(cls):
         cls.profile = json.loads((ROOT / "opto-sync-adapter.json").read_text()); cls.manifest = tomllib.loads((ROOT / ".zpkg.toml").read_text()); cls.lock = tomllib.loads((ROOT / ".zpkg.lock").read_text())
     def test_dependency_and_identity(self):
-        self.assertEqual(self.manifest["dependencies"]["opto-sync/opto-sync-clients"], "^0.2.0"); self.assertEqual(self.manifest["install"]["dir"], "zed_modules"); self.assertEqual(self.profile["dependency"], {"package": "opto-sync/opto-sync-clients", "range": "^0.2.0", "installRoot": INSTALL}); self.assertEqual(self.profile["repository"], os.environ.get("GITHUB_REPOSITORY", self.profile["repository"]))
+        self.assertEqual(self.manifest["dependencies"]["opto-sync/opto-sync-clients"], "^0.4.0"); self.assertEqual(self.manifest["install"]["dir"], "zed_modules"); self.assertEqual(self.profile["dependency"], {"package": "opto-sync/opto-sync-clients", "range": "^0.4.0", "installRoot": INSTALL}); self.assertEqual(self.profile["repository"], os.environ.get("GITHUB_REPOSITORY", self.profile["repository"]))
     def test_native_paths_stay_in_install_root(self):
         seen = set()
         for language, adapter in self.profile["nativeAdapters"].items():

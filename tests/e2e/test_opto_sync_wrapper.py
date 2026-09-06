@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_DEPENDENCY = {
     "package": "opto-sync/opto-sync-clients",
-    "range": "^0.2.0",
+    "range": "^0.4.0",
     "installRoot": "zed_modules/opto-sync/opto-sync-clients",
 }
 KNOWN_ADAPTERS = {
@@ -32,7 +32,7 @@ class OptoSyncWrapperE2E(unittest.TestCase):
         manifest, lock, profile = load_contract()
 
         self.assertEqual(
-            manifest["dependencies"]["opto-sync/opto-sync-clients"], "^0.2.0"
+            manifest["dependencies"]["opto-sync/opto-sync-clients"], "^0.4.0"
         )
         self.assertEqual(manifest["install"]["dir"], "zed_modules")
         self.assertEqual(profile["dependency"], EXPECTED_DEPENDENCY)
