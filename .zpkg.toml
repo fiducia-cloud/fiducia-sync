@@ -10,6 +10,9 @@ keywords = ["offline-first", "postgres", "supabase", "sync"]
 vcs = "git"
 url = "https://github.com/fiducia-cloud/fiducia-sync"
 
+[dependencies]
+"opto-sync/opto-sync-clients" = "^0.4.0"
+
 [targets.rust]
 dir = "."
 name = "fiducia-sync-core"
