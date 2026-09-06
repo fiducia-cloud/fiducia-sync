@@ -19,9 +19,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Browser bindings (JSON string in/out) — only compiled for the wasm build so
-// native `cargo test` stays free of wasm-bindgen. See src/wasm.rs.
+// native `cargo test` stays free of wasm-bindgen. See src/wasm.rs. The module is
+// public when enabled because its wasm-bindgen exports are part of the crate's
+// supported browser surface rather than unreachable implementation details.
 #[cfg(feature = "wasm")]
-mod wasm;
+pub mod wasm;
 
 // Cross-runtime utilities. Each has a hand-mirrored JS (`langs/typescript/src/*.mjs`) and
 // Dart (`langs/dart/lib/src/*.dart`) twin pinned to the same shared fixtures under
@@ -99,6 +101,7 @@ pub enum Reconcile {
 }
 
 /// Decide how an incoming change reconciles against the local row (if any).
+#[must_use]
 pub fn reconcile(local: Option<LocalRow>, incoming: &ChangeEvent) -> Reconcile {
     match local {
         None => match incoming.op {
@@ -136,6 +139,7 @@ pub enum Resolution {
     KeepLocal,
 }
 
+#[must_use]
 pub fn resolve_conflict(policy: ConflictPolicy) -> Resolution {
     match policy {
         ConflictPolicy::ServerWins => Resolution::ApplyServer,
@@ -164,6 +168,7 @@ pub struct QueuedWrite {
 impl QueuedWrite {
     /// The row version the server will assign when it commits this write — used
     /// to recognize the change-event echo of our own write (not a conflict).
+    #[must_use]
     pub fn expected_version(&self) -> i64 {
         self.base_version.saturating_add(1)
     }
@@ -174,6 +179,7 @@ impl QueuedWrite {
     /// even if the committed version drifted past `base_version + 1`, while a
     /// missing or different token is not our echo even at exactly that version.
     /// Only legacy queue records with no key use the version heuristic.
+    #[must_use]
     pub fn is_echo_of(&self, incoming: &ChangeEvent) -> bool {
         if incoming.table != self.table || incoming.id != self.id || incoming.op != self.op {
             return false;
@@ -203,6 +209,7 @@ pub enum AckOutcome {
 }
 
 /// Reconcile a server ack for one of our optimistic writes against local state.
+#[must_use]
 pub fn on_ack(local: LocalRow, ack: &WriteAck) -> AckOutcome {
     if local.version <= ack.committed_version {
         AckOutcome::Adopt(ack.committed_version)
