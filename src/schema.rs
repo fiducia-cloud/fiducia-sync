@@ -120,6 +120,7 @@ impl SchemaValidator {
     }
 
     /// The `$defs` names this document can validate, in stable order.
+    #[must_use]
     pub fn definitions(&self) -> Vec<&str> {
         self.defs()
             .map(|defs| defs.keys().map(String::as_str).collect())
@@ -175,7 +176,13 @@ impl SchemaValidator {
             match schema {
                 Value::Bool(true) => {}
                 Value::Bool(false) => fail(out, "schema forbids any value".into()),
-                _ => fail(out, "schema node must be an object or boolean".into()),
+                Value::Null
+                | Value::Number(_)
+                | Value::String(_)
+                | Value::Array(_)
+                | Value::Object(_) => {
+                    fail(out, "schema node must be an object or boolean".into());
+                }
             }
             return;
         };
@@ -364,7 +371,7 @@ impl SchemaValidator {
         }
         if schema.get("uniqueItems") == Some(&Value::Bool(true)) {
             for (index, item) in items.iter().enumerate() {
-                if items[..index].contains(item) {
+                if items.iter().take(index).any(|prior| prior == item) {
                     out.push(SchemaViolation {
                         path: format!("{path}[{index}]"),
                         message: "array items are not unique".into(),
@@ -462,7 +469,7 @@ fn type_matches(expected: &Value, value: &Value) -> bool {
     match expected {
         Value::String(name) => matches_one(name),
         Value::Array(names) => names.iter().filter_map(Value::as_str).any(matches_one),
-        _ => false,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => false,
     }
 }
 
@@ -473,7 +480,7 @@ fn check_supported(node: &Value, path: &str) -> Result<(), SchemaError> {
     let object = match node {
         Value::Bool(_) => return Ok(()),
         Value::Object(object) => object,
-        _ => {
+        Value::Null | Value::Number(_) | Value::String(_) | Value::Array(_) => {
             return Err(SchemaError(format!(
                 "schema node at {path} must be an object or boolean"
             )))

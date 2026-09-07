@@ -47,6 +47,7 @@ pub struct HlcStamp {
 
 impl HlcStamp {
     /// Fixed-width sortable form: 12 hex digits of ms + `-` + 4 hex of counter.
+    #[must_use]
     pub fn encode(self) -> String {
         format!(
             "{:012x}-{:04x}",
@@ -56,16 +57,16 @@ impl HlcStamp {
     }
 
     /// Parse the canonical encoding; `None` for anything malformed.
+    #[must_use]
     pub fn decode(text: &str) -> Option<HlcStamp> {
-        let bytes = text.as_bytes();
-        if bytes.len() != 17 || bytes[12] != b'-' {
+        let (wall_hex, counter_hex) = text.split_once('-')?;
+        if wall_hex.len() != 12 || counter_hex.len() != 4 {
             return None;
         }
         let lower_hex = |s: &str| {
             s.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        let (wall_hex, counter_hex) = (&text[..12], &text[13..]);
         if !lower_hex(wall_hex) || !lower_hex(counter_hex) {
             return None;
         }
@@ -85,11 +86,13 @@ pub struct Hlc {
 }
 
 impl Hlc {
+    #[must_use]
     pub fn new() -> Hlc {
         Hlc::default()
     }
 
     /// Restore a persisted clock. Out-of-range values are clamped, never rejected.
+    #[must_use]
     pub fn from_state(wall_ms: i64, counter: u32) -> Hlc {
         Hlc {
             wall_ms: clamp_wall(wall_ms),
@@ -98,6 +101,7 @@ impl Hlc {
     }
 
     /// The state to persist: `(wall_ms, counter)` of the last issued stamp.
+    #[must_use]
     pub fn state(&self) -> (i64, u32) {
         (self.wall_ms, self.counter)
     }

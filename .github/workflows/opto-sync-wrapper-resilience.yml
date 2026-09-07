@@ -10,4 +10,4 @@ permissions:
 
 jobs:
   wrapper-resilience:
-    uses: opto-sync/opto-sync-e2e/.github/workflows/downstream-wrapper-reusable.yml@dcf5ee5d15e4ed6aeb24952b296947b4ffb39e88
+    uses: opto-sync/opto-sync-e2e/.github/workflows/downstream-wrapper-reusable.yml@469b392d309413d7b763f2b9b01ea5e045fa0d80

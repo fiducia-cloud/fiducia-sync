@@ -174,10 +174,10 @@ fn on_ack_is_total_at_extremes() {
 }
 
 #[test]
-fn json_wire_shapes_match_the_ts_shim_contract() {
+fn json_wire_shapes_match_the_ts_shim_contract() -> Result<(), serde_json::Error> {
     // langs/typescript/src/core.mjs parses these exact shapes. If an enum's serde repr drifts,
     // the browser silently mis-reconciles — pin it here.
-    let apply = serde_json::to_string(&reconcile(None, &ev(ChangeOp::Upsert, 1))).unwrap();
+    let apply = serde_json::to_string(&reconcile(None, &ev(ChangeOp::Upsert, 1)))?;
     assert_eq!(apply, "\"Apply\"");
 
     let stale = serde_json::to_string(&reconcile(
@@ -186,8 +186,7 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
             dirty: false,
         }),
         &ev(ChangeOp::Upsert, 4),
-    ))
-    .unwrap();
+    ))?;
     assert_eq!(stale, "{\"Ignore\":\"Stale\"}");
 
     let conflict = serde_json::to_string(&reconcile(
@@ -196,8 +195,7 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
             dirty: true,
         }),
         &ev(ChangeOp::Upsert, 6),
-    ))
-    .unwrap();
+    ))?;
     assert_eq!(conflict, "\"Conflict\"");
 
     let adopt = serde_json::to_string(&on_ack(
@@ -209,8 +207,7 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
             id: "k1".into(),
             committed_version: 6,
         },
-    ))
-    .unwrap();
+    ))?;
     assert_eq!(adopt, "{\"Adopt\":6}");
 
     let superseded = serde_json::to_string(&on_ack(
@@ -222,16 +219,15 @@ fn json_wire_shapes_match_the_ts_shim_contract() {
             id: "k1".into(),
             committed_version: 6,
         },
-    ))
-    .unwrap();
+    ))?;
     assert_eq!(superseded, "\"Superseded\"");
 
     // The ChangeEvent envelope round-trips (lowercase op) at an extreme version.
     let wire = r#"{"table":"api_keys","op":"delete","id":"k1","version":9223372036854775807}"#;
-    let decoded: ChangeEvent = serde_json::from_str(wire).unwrap();
+    let decoded: ChangeEvent = serde_json::from_str(wire)?;
     assert_eq!(decoded.op, ChangeOp::Delete);
     assert_eq!(decoded.version, i64::MAX);
-    assert!(serde_json::to_string(&decoded)
-        .unwrap()
-        .contains("\"op\":\"delete\""));
+    let reencoded = serde_json::to_string(&decoded)?;
+    assert!(reencoded.contains("\"op\":\"delete\""));
+    Ok(())
 }

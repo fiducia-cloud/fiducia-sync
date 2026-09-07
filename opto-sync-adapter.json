@@ -6,7 +6,7 @@
   "rolloutIssue": "DEN-1387",
   "releaseGate": "DEN-309",
   "releaseState": "blocked-until-certified-package-published",
-  "dependency": {"package": "opto-sync/opto-sync-clients", "range": "^0.2.0", "installRoot": "zed_modules/opto-sync/opto-sync-clients"},
+  "dependency": {"package": "opto-sync/opto-sync-clients", "range": "^0.4.0", "installRoot": "zed_modules/opto-sync/opto-sync-clients"},
   "nativeAdapters": {
     "rust": {"package": "opto-sync-client", "path": "zed_modules/opto-sync/opto-sync-clients/clients/rust"},
     "typescript": {"package": "@opto-sync/client", "path": "zed_modules/opto-sync/opto-sync-clients/clients/ts"},
