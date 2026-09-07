@@ -1,0 +1,5 @@
+# Production/library code must remain panic-free under the workspace's
+# `-D warnings` Clippy gate. Test code may use direct assertions and fixture
+# extraction so failures retain the smallest, most readable witness.
+allow-unwrap-in-tests = true
+allow-indexing-slicing-in-tests = true
