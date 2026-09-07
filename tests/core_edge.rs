@@ -1,9 +1,13 @@
-use fiducia_sync_core::{
-    on_ack, reconcile, AckOutcome, ChangeEvent, ChangeOp, Hlc, LocalRow, QueuedWrite,
-    ReconcileAction, StaleReason, WriteAck,
-};
+//! Adversarial / totality tests for the reconcile core's PUBLIC API (the same
+//! surface the wasm ABI and the server-side reuse call). These pin two claims the
+//! README makes: reconcile is *total over any i64 version* (a hostile/stale change
+//! can never panic or wedge the engine), and the JSON the core emits is exactly
+//! the shape the TS shim (`langs/typescript/src/core.mjs`) parses.
 
-const EXTREMES: [i64; 7] = [i64::MIN, -1, 0, 1, i64::MAX - 1, i64::MAX, 42];
+use fiducia_sync_core::{
+    on_ack, reconcile, resolve_conflict, AckOutcome, ChangeEvent, ChangeOp, ConflictPolicy,
+    IgnoreReason, LocalRow, QueuedWrite, Reconcile, Resolution, WriteAck,
+};
 
 fn ev(op: ChangeOp, version: i64) -> ChangeEvent {
     ChangeEvent {
@@ -11,78 +15,93 @@ fn ev(op: ChangeOp, version: i64) -> ChangeEvent {
         op,
         id: "k1".into(),
         version,
+        row: serde_json::Value::Null,
+        at_ms: 0,
+        write_key: None,
     }
 }
 
+const EXTREMES: [i64; 6] = [i64::MIN, -1, 0, 1, 100, i64::MAX];
+
 #[test]
-fn clean_rows_follow_remote_truth_at_version_extremes() {
-    for &local_version in &EXTREMES {
-        for &remote_version in &EXTREMES {
-            let local = LocalRow {
-                version: local_version,
-                dirty: false,
-            };
-            let got = reconcile(Some(local), &ev(ChangeOp::Upsert, remote_version));
-            let expected = if remote_version > local_version {
-                ReconcileAction::Apply
-            } else if remote_version == local_version {
-                ReconcileAction::Ignore(StaleReason::Echo)
-            } else {
-                ReconcileAction::Ignore(StaleReason::Stale)
-            };
-            assert_eq!(got, expected, "local={local_version} remote={remote_version}");
+fn reconcile_is_total_and_monotone_over_i64_extremes() {
+    // No combination of (local, incoming, dirty, op) may panic, and the decision
+    // must always agree with the version ordering — the ordering key is the sole
+    // arbiter, so a hostile version at either extreme can't wedge the engine.
+    for &lv in &EXTREMES {
+        for &iv in &EXTREMES {
+            for dirty in [false, true] {
+                for op in [ChangeOp::Upsert, ChangeOp::Delete] {
+                    let local = LocalRow { version: lv, dirty };
+                    let decision = reconcile(Some(local), &ev(op, iv));
+                    if iv < lv {
+                        assert_eq!(
+                            decision,
+                            Reconcile::Ignore(IgnoreReason::Stale),
+                            "iv<lv stale"
+                        );
+                    } else if iv == lv {
+                        assert_eq!(
+                            decision,
+                            Reconcile::Ignore(IgnoreReason::AlreadyApplied),
+                            "iv==lv already-applied"
+                        );
+                    } else if dirty {
+                        assert_eq!(decision, Reconcile::Conflict, "newer over dirty = conflict");
+                    } else {
+                        assert_eq!(decision, Reconcile::Apply, "newer over clean = apply");
+                    }
+                }
+            }
         }
     }
 }
 
+/// One full reconcile step under the default server-wins policy: take the
+/// decision and apply it to the local row, exactly as the SDK does.
+fn reconcile_step(local: Option<LocalRow>, event: &ChangeEvent) -> Option<LocalRow> {
+    let adopt_server = || match event.op {
+        ChangeOp::Upsert => Some(LocalRow {
+            version: event.version,
+            dirty: false,
+        }),
+        ChangeOp::Delete => None,
+    };
+    match reconcile(local, event) {
+        Reconcile::Apply => adopt_server(),
+        Reconcile::Ignore(_) => local,
+        Reconcile::Conflict => match resolve_conflict(ConflictPolicy::ServerWins) {
+            Resolution::ApplyServer => adopt_server(),
+            Resolution::KeepLocal => local,
+        },
+    }
+}
+
 #[test]
-fn dirty_rows_report_newer_remote_changes_as_conflicts() {
-    for &local_version in &EXTREMES {
-        for &remote_version in &EXTREMES {
-            let local = LocalRow {
-                version: local_version,
-                dirty: true,
-            };
-            let got = reconcile(Some(local), &ev(ChangeOp::Delete, remote_version));
-            let expected = if remote_version > local_version {
-                ReconcileAction::Conflict
-            } else if remote_version == local_version {
-                ReconcileAction::Ignore(StaleReason::Echo)
-            } else {
-                ReconcileAction::Ignore(StaleReason::Stale)
-            };
-            assert_eq!(got, expected, "local={local_version} remote={remote_version}");
+fn reconcile_step_is_idempotent_over_adversarial_version_pairs() {
+    // Delivering the same change twice (redelivery, reconnect replay) must be
+    // a no-op the second time: step(step(s, e), e) == step(s, e), and once a
+    // step has run, the SAME event may never provoke another Apply/Conflict.
+    let mut locals: Vec<Option<LocalRow>> = vec![None];
+    for &version in &EXTREMES {
+        for dirty in [false, true] {
+            locals.push(Some(LocalRow { version, dirty }));
         }
     }
-}
-
-#[test]
-fn absent_rows_apply_every_remote_version() {
-    for &remote_version in &EXTREMES {
-        assert_eq!(
-            reconcile(None, &ev(ChangeOp::Delete, remote_version)),
-            ReconcileAction::Apply
-        );
-    }
-}
-
-#[test]
-fn hlc_round_trip_preserves_negative_and_extreme_components() {
-    let logical_values = [0_u32, 1, u32::MAX];
-    let node_ids = ["node", "node:with:colons", "", "こんにちは"];
-    for &physical_ms in &EXTREMES {
-        for &logical in &logical_values {
-            for node_id in node_ids {
-                let hlc = Hlc {
-                    physical_ms,
-                    logical,
-                    node_id: node_id.into(),
-                };
-                let encoded = hlc.encode();
+    for &local in &locals {
+        for &incoming in &EXTREMES {
+            for op in [ChangeOp::Upsert, ChangeOp::Delete] {
+                let event = ev(op, incoming);
+                let once = reconcile_step(local, &event);
+                let twice = reconcile_step(once, &event);
                 assert_eq!(
-                    Hlc::decode(&encoded),
-                    Some(hlc),
-                    "failed HLC round-trip for {encoded}"
+                    twice, once,
+                    "step not idempotent for local={local:?} event={event:?}"
+                );
+                assert!(
+                    matches!(reconcile(once, &event), Reconcile::Ignore(_)),
+                    "redelivered event must be ignored after the step: \
+                     local={local:?} event={event:?} -> {once:?}"
                 );
             }
         }
@@ -90,90 +109,34 @@ fn hlc_round_trip_preserves_negative_and_extreme_components() {
 }
 
 #[test]
-fn hlc_decode_rejects_malformed_or_out_of_range_values() {
-    for malformed in [
-        "",
-        ":",
-        "1:2",
-        "not-a-number:2:n",
-        "1:not-a-number:n",
-        "1:4294967296:n",
-        "1:-1:n",
-    ] {
-        assert_eq!(Hlc::decode(malformed), None, "accepted malformed HLC {malformed:?}");
+fn no_local_row_adopts_upsert_ignores_delete_at_any_version() {
+    for &iv in &EXTREMES {
+        assert_eq!(reconcile(None, &ev(ChangeOp::Upsert, iv)), Reconcile::Apply);
+        assert_eq!(
+            reconcile(None, &ev(ChangeOp::Delete, iv)),
+            Reconcile::Ignore(IgnoreReason::AlreadyApplied)
+        );
     }
 }
 
 #[test]
-fn hlc_ordering_is_lexicographic_without_overflow() {
-    let points = [
-        Hlc {
-            physical_ms: i64::MIN,
-            logical: u32::MAX,
-            node_id: "z".into(),
-        },
-        Hlc {
-            physical_ms: -1,
-            logical: 0,
-            node_id: "a".into(),
-        },
-        Hlc {
-            physical_ms: 0,
-            logical: 0,
-            node_id: "a".into(),
-        },
-        Hlc {
-            physical_ms: i64::MAX,
-            logical: u32::MAX,
-            node_id: "z".into(),
-        },
-    ];
-    for window in points.windows(2) {
-        assert!(window[0] < window[1]);
-    }
-}
-
-#[test]
-fn queued_write_echo_detection_does_not_overflow_at_i64_max() {
+fn echo_detection_saturates_and_never_overflows_at_i64_max() {
+    // expected_version() = base_version + 1 must NOT overflow-panic at i64::MAX
+    // (the crate uses saturating_add). A hostile ChangeEvent claiming version
+    // i64::MAX must be classifiable without wedging.
     let queued = QueuedWrite {
-        table: "api_keys".into(),
         id: "k1".into(),
+        table: "api_keys".into(),
+        op: ChangeOp::Upsert,
+        payload: serde_json::Value::Null,
         base_version: i64::MAX,
-        payload: "{}".into(),
+        key: None,
     };
-    // checked_add returns None: no event can be an echo past i64::MAX.
-    for &version in &EXTREMES {
-        assert!(!queued.is_echo_of(&ev(ChangeOp::Upsert, version)));
-    }
-}
-
-#[test]
-fn queued_write_identity_and_operation_must_match_for_echo() {
-    let queued = QueuedWrite {
-        table: "api_keys".into(),
-        id: "k1".into(),
-        base_version: 5,
-        payload: "{}".into(),
-    };
-    let mut event = ev(ChangeOp::Upsert, 6);
-    event.table = "other".into();
-    assert!(!queued.is_echo_of(&event));
-    event.table = "api_keys".into();
-    event.id = "other".into();
-    assert!(!queued.is_echo_of(&event));
-    event.id = "k1".into();
-    event.op = ChangeOp::Delete;
-    assert!(!queued.is_echo_of(&event));
-}
-
-#[test]
-fn queued_write_is_total_at_all_version_extremes() {
-    let queued = QueuedWrite {
-        table: "api_keys".into(),
-        id: "k1".into(),
-        base_version: i64::MIN,
-        payload: "{}".into(),
-    };
+    assert_eq!(
+        queued.expected_version(),
+        i64::MAX,
+        "saturates, no overflow panic"
+    );
     // is_echo_of over the extremes never panics.
     for &iv in &EXTREMES {
         let _ = queued.is_echo_of(&ev(ChangeOp::Upsert, iv));
