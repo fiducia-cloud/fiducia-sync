@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_DEPENDENCY = {
     "package": "opto-sync/opto-sync-clients",
-    "range": "^0.2.0",
+    "range": "^0.4.0",
     "installRoot": "zed_modules/opto-sync/opto-sync-clients",
 }
 KNOWN_ADAPTERS = {
@@ -31,13 +31,12 @@ class OptoSyncWrapperE2E(unittest.TestCase):
     def test_dependency_and_lock_provenance_fail_closed(self) -> None:
         manifest, lock, profile = load_contract()
 
-        self.assertEqual(
-            manifest["dependencies"]["opto-sync/opto-sync-clients"], "^0.2.0"
-        )
         self.assertEqual(manifest["install"]["dir"], "zed_modules")
         self.assertEqual(profile["dependency"], EXPECTED_DEPENDENCY)
         packages = lock.get("package", [])
         if profile["releaseState"] == "blocked-until-certified-package-published":
+            self.assertNotIn("opto-sync/opto-sync-clients", manifest.get("dependencies", {}))
+            self.assertIn("opto-sync/opto-sync-clients@^0.4.0", (ROOT / ".zpkg.toml").read_text(encoding="utf-8"))
             self.assertEqual(lock.get("version"), 1)
             self.assertEqual(packages, [])
         else:

@@ -10,6 +10,11 @@ keywords = ["offline-first", "postgres", "supabase", "sync"]
 vcs = "git"
 url = "https://github.com/fiducia-cloud/fiducia-sync"
 
+# Reviewed against opto-sync/opto-sync-clients@^0.4.0; keep unresolved until
+# the certified public artifact is published.
+[install]
+dir = "zed_modules"
+
 [targets.rust]
 dir = "."
 name = "fiducia-sync-core"
