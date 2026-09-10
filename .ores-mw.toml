@@ -1,0 +1,11 @@
+# ORES middleware consumer orchestration. Full stack authority lives in ORESoftware/ores-middleware.
+schema_version = 1
+repository_mode = "client-only"
+default_target = "client"
+
+[[targets]]
+name = "client"
+role = "client"
+roots = ["."]
+middleware = "propagation-only"
+propagate_headers = ["traceparent", "baggage", "x-request-id"]
