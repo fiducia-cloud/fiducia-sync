@@ -17,20 +17,25 @@ fn event(version: i64, write_key: Option<&str>) -> ChangeEvent {
 
 #[test]
 fn change_event_defaults_optional_fields_and_ignores_forward_fields() {
-    let decoded: ChangeEvent = serde_json::from_value(json!({
+    let decoded: ChangeEvent = match serde_json::from_value(json!({
         "table": "api_keys",
         "op": "delete",
         "id": "key-1",
         "version": 7,
         "future_transport_hint": {"partition": 3}
-    }))
-    .expect("forward-compatible event");
+    })) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("forward-compatible event failed to decode: {error}"),
+    };
 
     assert_eq!(decoded.row, Value::Null);
     assert_eq!(decoded.at_ms, 0);
     assert_eq!(decoded.write_key, None);
 
-    let encoded = serde_json::to_value(decoded).expect("serialize event");
+    let encoded = match serde_json::to_value(decoded) {
+        Ok(encoded) => encoded,
+        Err(error) => panic!("event failed to serialize: {error}"),
+    };
     assert_eq!(encoded["row"], Value::Null);
     assert_eq!(encoded["at_ms"], 0);
     assert!(encoded.get("write_key").is_none());
@@ -62,8 +67,14 @@ fn queued_write_round_trip_preserves_payload_and_authoritative_key() {
         key: Some("write-123".into()),
     };
 
-    let wire = serde_json::to_string(&queued).expect("serialize queued write");
-    let decoded: QueuedWrite = serde_json::from_str(&wire).expect("decode queued write");
+    let wire = match serde_json::to_string(&queued) {
+        Ok(wire) => wire,
+        Err(error) => panic!("queued write failed to serialize: {error}"),
+    };
+    let decoded: QueuedWrite = match serde_json::from_str(&wire) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("queued write failed to decode: {error}"),
+    };
 
     assert_eq!(decoded, queued);
     assert_eq!(decoded.expected_version(), 42);
@@ -127,8 +138,14 @@ fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() {
             id: "key-1".into(),
             committed_version,
         };
-        let wire = serde_json::to_string(&ack).expect("serialize ack");
-        let decoded: WriteAck = serde_json::from_str(&wire).expect("decode ack");
+        let wire = match serde_json::to_string(&ack) {
+            Ok(wire) => wire,
+            Err(error) => panic!("ack failed to serialize: {error}"),
+        };
+        let decoded: WriteAck = match serde_json::from_str(&wire) {
+            Ok(decoded) => decoded,
+            Err(error) => panic!("ack failed to decode: {error}"),
+        };
         assert_eq!(decoded, ack);
 
         let local = LocalRow {
