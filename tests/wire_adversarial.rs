@@ -2,6 +2,7 @@ use fiducia_sync_core::{
     on_ack, AckOutcome, ChangeEvent, ChangeOp, LocalRow, QueuedWrite, WriteAck,
 };
 use serde_json::{json, Value};
+use std::error::Error;
 
 fn event(version: i64, write_key: Option<&str>) -> ChangeEvent {
     ChangeEvent {
@@ -16,30 +17,25 @@ fn event(version: i64, write_key: Option<&str>) -> ChangeEvent {
 }
 
 #[test]
-fn change_event_defaults_optional_fields_and_ignores_forward_fields() {
-    let decoded: ChangeEvent = match serde_json::from_value(json!({
+fn change_event_defaults_optional_fields_and_ignores_forward_fields() -> Result<(), Box<dyn Error>> {
+    let decoded: ChangeEvent = serde_json::from_value(json!({
         "table": "api_keys",
         "op": "delete",
         "id": "key-1",
         "version": 7,
         "future_transport_hint": {"partition": 3}
-    })) {
-        Ok(decoded) => decoded,
-        Err(error) => panic!("forward-compatible event failed to decode: {error}"),
-    };
+    }))?;
 
     assert_eq!(decoded.row, Value::Null);
     assert_eq!(decoded.at_ms, 0);
     assert_eq!(decoded.write_key, None);
 
-    let encoded = match serde_json::to_value(decoded) {
-        Ok(encoded) => encoded,
-        Err(error) => panic!("event failed to serialize: {error}"),
-    };
+    let encoded = serde_json::to_value(decoded)?;
     assert_eq!(encoded["row"], Value::Null);
     assert_eq!(encoded["at_ms"], 0);
     assert!(encoded.get("write_key").is_none());
     assert!(encoded.get("future_transport_hint").is_none());
+    Ok(())
 }
 
 #[test]
@@ -57,7 +53,7 @@ fn change_event_rejects_invalid_operation_missing_identity_and_string_version() 
 }
 
 #[test]
-fn queued_write_round_trip_preserves_payload_and_authoritative_key() {
+fn queued_write_round_trip_preserves_payload_and_authoritative_key() -> Result<(), Box<dyn Error>> {
     let queued = QueuedWrite {
         id: "key-1".into(),
         table: "api_keys".into(),
@@ -67,17 +63,12 @@ fn queued_write_round_trip_preserves_payload_and_authoritative_key() {
         key: Some("write-123".into()),
     };
 
-    let wire = match serde_json::to_string(&queued) {
-        Ok(wire) => wire,
-        Err(error) => panic!("queued write failed to serialize: {error}"),
-    };
-    let decoded: QueuedWrite = match serde_json::from_str(&wire) {
-        Ok(decoded) => decoded,
-        Err(error) => panic!("queued write failed to decode: {error}"),
-    };
+    let wire = serde_json::to_string(&queued)?;
+    let decoded: QueuedWrite = serde_json::from_str(&wire)?;
 
     assert_eq!(decoded, queued);
     assert_eq!(decoded.expected_version(), 42);
+    Ok(())
 }
 
 #[test]
@@ -132,20 +123,14 @@ fn legacy_echo_detection_never_wraps_from_i64_max_to_i64_min() {
 }
 
 #[test]
-fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() {
+fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() -> Result<(), Box<dyn Error>> {
     for committed_version in [i64::MIN, -1, 0, 1, i64::MAX] {
         let ack = WriteAck {
             id: "key-1".into(),
             committed_version,
         };
-        let wire = match serde_json::to_string(&ack) {
-            Ok(wire) => wire,
-            Err(error) => panic!("ack failed to serialize: {error}"),
-        };
-        let decoded: WriteAck = match serde_json::from_str(&wire) {
-            Ok(decoded) => decoded,
-            Err(error) => panic!("ack failed to decode: {error}"),
-        };
+        let wire = serde_json::to_string(&ack)?;
+        let decoded: WriteAck = serde_json::from_str(&wire)?;
         assert_eq!(decoded, ack);
 
         let local = LocalRow {
@@ -157,4 +142,5 @@ fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() {
             AckOutcome::Adopt(committed_version)
         );
     }
+    Ok(())
 }
