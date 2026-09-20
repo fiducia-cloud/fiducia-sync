@@ -1,4 +1,6 @@
-use fiducia_sync_core::{on_ack, AckOutcome, ChangeEvent, ChangeOp, LocalRow, QueuedWrite, WriteAck};
+use fiducia_sync_core::{
+    on_ack, AckOutcome, ChangeEvent, ChangeOp, LocalRow, QueuedWrite, WriteAck,
+};
 use serde_json::{json, Value};
 
 fn event(version: i64, write_key: Option<&str>) -> ChangeEvent {
@@ -133,6 +135,9 @@ fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() {
             version: committed_version,
             dirty: true,
         };
-        assert_eq!(on_ack(local, &decoded), AckOutcome::Adopt(committed_version));
+        assert_eq!(
+            on_ack(local, &decoded),
+            AckOutcome::Adopt(committed_version)
+        );
     }
 }
