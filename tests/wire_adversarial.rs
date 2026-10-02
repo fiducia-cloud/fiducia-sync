@@ -17,7 +17,8 @@ fn event(version: i64, write_key: Option<&str>) -> ChangeEvent {
 }
 
 #[test]
-fn change_event_defaults_optional_fields_and_ignores_forward_fields() -> Result<(), Box<dyn Error>> {
+fn change_event_defaults_optional_fields_and_ignores_forward_fields() -> Result<(), Box<dyn Error>>
+{
     let decoded: ChangeEvent = serde_json::from_value(json!({
         "table": "api_keys",
         "op": "delete",
@@ -123,7 +124,8 @@ fn legacy_echo_detection_never_wraps_from_i64_max_to_i64_min() {
 }
 
 #[test]
-fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() -> Result<(), Box<dyn Error>> {
+fn write_ack_wire_round_trip_preserves_extreme_versions_and_outcomes() -> Result<(), Box<dyn Error>>
+{
     for committed_version in [i64::MIN, -1, 0, 1, i64::MAX] {
         let ack = WriteAck {
             id: "key-1".into(),
