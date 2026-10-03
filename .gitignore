@@ -29,3 +29,7 @@ Thumbs.db
 **/*.rs.bk
 *.pdb
 .cargo-target-*/
+tmp
+temp
+tmp/worktrees
+temp/worktrees
