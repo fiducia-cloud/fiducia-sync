@@ -55,3 +55,4 @@ env/dec
 
 # Sanctioned scratch locations - AGENTS.md requires both, trailing-slash form
 temp/
+tools/language-layout/target/
